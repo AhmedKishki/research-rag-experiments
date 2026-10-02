@@ -10,7 +10,8 @@ concern is tested by that concern's tests alone.
 | `test_guard.py` | that a source project is digested, and what a change reads as |
 | `test_sandbox.py` | that a copy is a valid project and carries nothing else |
 | `test_spec.py` | that a specification is refused when it says something unclear |
-| `test_execute.py` | that an arm's command says what the specification asked for |
+| `test_execute.py` | that an arm's command says what the specification asked for, what a code arm's checkout holds, and what a report must carry to be believed |
+| `test_run.py` | a whole run against a subprocess stub harness: evidence placement, refusals, and the record every exit leaves |
 | `test_compare.py` | that the table reads a report and computes no metric |
 | `test_record.py` | that a run's verdict follows from the guard |
 | `test_cli.py` | the one command's statuses and its refusals |

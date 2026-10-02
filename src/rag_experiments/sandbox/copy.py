@@ -6,6 +6,10 @@ what lets the app's own harness measure it without knowing it is a copy, and wha
 makes a re-ingestion in a sandbox produce the same `source_id` values the
 original would.
 
+Every file is copied as bytes into a new inode. A hard link, a reflink, or a
+bind mount would make a write inside the sandbox a write to the corpus, and the
+guard would then report a change it caused rather than one it found.
+
 Two things are deliberately not carried, and neither is named by hand:
 
 - Everything under the runtime directory except the selected-generation pointer
@@ -23,6 +27,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import time
 from dataclasses import dataclass, field
@@ -35,6 +40,7 @@ from .layout import (
     ProjectLayout,
     existing_generations,
     read_layout,
+    refuse_nested,
     selected_generation,
 )
 
@@ -48,7 +54,8 @@ PROJECT_DIRECTORY = "project"
 
 #: The empty configuration home a child is pointed at, so the account overlay
 #: resolves somewhere with no file in it. The model cache is not relocated: those
-#: are immutable binaries and a run does not download anything.
+#: are immutable binaries and a run does not download anything, and its resolved
+#: path is pinned into the settings a run writes.
 CONFIG_HOME_DIRECTORY = "xdg"
 
 #: Written with the same rule the app uses for its own records: readable, stable,
@@ -82,7 +89,14 @@ class Sandbox:
         return {
             "name": self.name,
             "root": str(self.root),
+            # Where the sandbox area is, so `sandbox remove` can be aimed at it by
+            # hand once a run has finished with it.
+            "workspace": str(self.workspace),
+            # The copy's own originals, not the original's. A record that named
+            # the original here would point a reader, and a prepare command's
+            # `{source}`, at the corpus the run promised not to touch.
             "source_root": str(self.source_root),
+            "original_source_root": str(self.origin.get("original_source_root") or ""),
             "project_id": self.project_id,
             "generation_ids": list(self.generation_ids),
             "settings_file": str(self.settings_file),
@@ -110,8 +124,13 @@ def create(
     compared without either being rebuilt.
     """
 
-    if not name or any(character in name for character in "/\\"):
-        raise ExperimentError(f"A sandbox name is a single path segment: {name!r}")
+    _require_segment(name, what="A sandbox name")
+    refuse_nested(
+        Path(workspace).expanduser().resolve() / name,
+        Path(source).expanduser().resolve(),
+        what="The sandbox directory",
+        inside="source project",
+    )
     layout = read_layout(source)
     chosen = tuple(generations) or (selected_generation(layout),)
     for generation_id in chosen:
@@ -122,7 +141,7 @@ def create(
             )
 
     area = (Path(workspace).expanduser().resolve()) / name
-    if area.exists():
+    if area.exists() or area.is_symlink():
         raise ExperimentError(
             f"A sandbox already exists at {area}. Remove it with "
             f"`rag-experiments sandbox remove --workspace {workspace} --name {name}`."
@@ -132,8 +151,9 @@ def create(
     area.mkdir(parents=True)
     project_root = area / PROJECT_DIRECTORY
     try:
-        _copy_directory(
-            layout.source_root, project_root / _relative(layout, layout.source_root)
+        copied_source = _copy_directory(
+            layout.source_root,
+            project_root / layout.source_relative(layout.source_root),
         )
         _copy_portable(layout, project_root)
         _copy_generations(layout, project_root, chosen)
@@ -145,7 +165,7 @@ def create(
             name=name,
             workspace=area,
             root=project_root,
-            source_root=layout.source_root,
+            source_root=copied_source,
             project_id=_project_id(layout),
             generation_ids=chosen,
             settings_file=settings_file,
@@ -156,6 +176,7 @@ def create(
             elapsed_seconds=time.perf_counter() - started,
             origin={
                 "source_project": str(layout.root),
+                "original_source_root": str(layout.source_root),
                 "layout": layout.describe(),
                 "pointed_generation": selected_generation(layout),
             },
@@ -165,7 +186,7 @@ def create(
         # A half-built sandbox is not a project, and leaving one would be a
         # directory a later run could mistake for it. Everything after the
         # directory is created is inside this, so no partial sandbox survives.
-        shutil.rmtree(area, ignore_errors=True)
+        _discard(area)
         raise
     return sandbox
 
@@ -186,41 +207,79 @@ def list_sandboxes(workspace: Path) -> list[dict[str, Any]]:
     """Every sandbox in a workspace, as the records this harness wrote.
 
     A directory in a workspace with no record is not reported and is not a sandbox
-    this harness can remove: a marker is what makes destruction safe.
+    this harness can remove: a marker is what makes destruction safe. A workspace
+    holding run directories is searched to any depth, because a run keeps its
+    sandboxes under a directory named for the run.
     """
 
     area = Path(workspace).expanduser().resolve()
     if not area.is_dir():
         return []
     found: list[dict[str, Any]] = []
-    for candidate in sorted(area.iterdir()):
-        record = candidate / SANDBOX_RECORD
-        if record.is_file():
-            found.append(json.loads(record.read_text(encoding="utf-8")))
+    for record in sorted(area.rglob(SANDBOX_RECORD)):
+        if not record.is_file():
+            continue
+        document = json.loads(record.read_text(encoding="utf-8"))
+        if isinstance(document, dict):
+            found.append({**document, "workspace": str(record.parent)})
     return found
 
 
 def remove(workspace: Path, name: str) -> Path:
     """Delete a sandbox this harness made, refusing anything it did not."""
 
+    _require_segment(name, what="A sandbox name")
     area = (Path(workspace).expanduser().resolve()) / name
+    if area.is_symlink():
+        raise ExperimentError(
+            f"{area} is a symbolic link. This harness removes a sandbox it made "
+            "under a name it chose, and follows no link out of the workspace."
+        )
     record = area / SANDBOX_RECORD
     if not record.is_file():
         raise ExperimentError(
             f"{area} is not a sandbox this harness made: it has no {SANDBOX_RECORD}. "
             "Nothing was removed."
         )
+    try:
+        stated = str(json.loads(record.read_text(encoding="utf-8")).get("name") or "")
+    except (OSError, json.JSONDecodeError):
+        stated = ""
+    if stated != name:
+        raise ExperimentError(
+            f"{record} names a sandbox called {stated!r}, not {name!r}. Nothing was "
+            "removed."
+        )
     shutil.rmtree(area)
     return area
 
 
-def _copy_directory(source: Path, destination: Path) -> None:
+def _require_segment(name: str, *, what: str) -> None:
+    """Refuse a name that is not one plain path segment.
+
+    A name that reaches a parent, a root, or another directory is a name a
+    `remove` would act on somewhere the caller did not name, so it is refused
+    before the path is built rather than after something is created there.
+    """
+
+    if not name or name in {".", ".."} or "/" in name or "\\" in name:
+        raise ExperimentError(
+            f"{what} is a single plain path segment, not a path: {name!r}"
+        )
+    if os.sep in name or name.strip() != name:
+        raise ExperimentError(
+            f"{what} has characters a path segment cannot hold: {name!r}"
+        )
+
+
+def _copy_directory(source: Path, destination: Path) -> Path:
     """Copy a directory tree byte for byte, refusing what cannot be copied safely.
 
     A symbolic link is refused rather than followed or recreated: the app refuses
     a symlinked original and a symlinked settings file, so a sandbox holding one
-    would be a project the app cannot measure. A hard link is copied as bytes,
-    which the app treats identically.
+    would be a project the app cannot measure. Every other entry is copied as
+    bytes into a new inode, which is what keeps a write inside the copy from
+    reaching the original.
     """
 
     if not source.is_dir():
@@ -233,6 +292,28 @@ def _copy_directory(source: Path, destination: Path) -> None:
             )
     destination.mkdir(parents=True, exist_ok=True)
     shutil.copytree(source, destination, symlinks=False, dirs_exist_ok=True)
+    _assert_independent(source, destination)
+    return destination
+
+
+def _assert_independent(source: Path, destination: Path) -> None:
+    """Refuse a copy that shares an inode with the tree it came from.
+
+    A reflinked or hard-linked copy would pass every byte comparison and still let
+    a write inside the sandbox rewrite the original, so the property is checked
+    rather than assumed from the copy function used.
+    """
+
+    originals = {path.stat().st_ino for path in source.rglob("*") if path.is_file()}
+    if not originals:
+        return
+    copies = {path.stat().st_ino for path in destination.rglob("*") if path.is_file()}
+    shared = originals & copies
+    if shared:
+        raise ExperimentError(
+            f"{destination} shares {len(shared)} inode(s) with {source}. A copy that "
+            "shares storage is not isolated, so it was removed rather than measured."
+        )
 
 
 def _copy_portable(layout: ProjectLayout, project_root: Path) -> None:
@@ -286,10 +367,6 @@ def _copy_generations(
         (state / layout.current_pointer).write_bytes(pointer.read_bytes())
 
 
-def _relative(layout: ProjectLayout, path: Path) -> str:
-    return path.relative_to(layout.root).as_posix()
-
-
 def _project_id(layout: ProjectLayout) -> str:
     document = json.loads(
         (layout.portable_root / layout.descriptor).read_text(encoding="utf-8")
@@ -319,6 +396,15 @@ def _write_record(sandbox: Sandbox) -> None:
         json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+
+
+def _discard(area: Path) -> None:
+    """Remove a directory this harness created, never following a link out of it."""
+
+    if area.is_symlink():
+        area.unlink()
+        return
+    shutil.rmtree(area, ignore_errors=True)
 
 
 def _now() -> str:

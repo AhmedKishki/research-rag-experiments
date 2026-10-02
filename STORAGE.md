@@ -1,220 +1,136 @@
-# STORAGE
+# `storage/`
 
-The on-disk format. Every file and directory a run or a sandbox creates, and the
-rule that decides what travels from a source project and what does not.
+What a run leaves on disk, and what a reader may conclude from it.
 
-## Two directories, both disposable
+Nothing here is authoritative about research-rag itself. The names the app owns —
+its portable directory, its generation pointer, its source directory, its pinned
+settings file — are read from the app's own code at run time and are deliberately
+not spelled out in this repository. What follows is the layout *this* repository
+owns.
 
-A run writes into two places, and neither is the project being measured.
+## Two directories, two jobs
 
-| Directory | Holds | Default |
-|---|---|---|
-| the workspace | one directory per sandbox, each holding a project and a record | `workspaces` |
-| the runs directory | one directory per run, holding a record and each arm's evidence | `runs` |
+```
+<workspace>/                                 the sandbox area: large and disposable
+└── <run-id>-<arm>/
+    ├── sandbox.json                         what this harness made, and from what
+    ├── project/                             a real research-rag project, a copy
+    │   ├── <source directory>/              the originals, byte for byte
+    │   └── .research-rag/
+    │       ├── project.json                 carries the original's project_id
+    │       ├── source-*.json                the review state, as the app wrote it
+    │       ├── config.toml                  pinned settings: every declared key
+    │       └── runtime/
+    │           ├── current.json             the selected generation
+    │           └── generations/<id>/        the generations the run asked for
+    ├── xdg/                                 the account overlay a child sees: empty
+    └── (nothing else)
 
-Both are ignored by git. A sandbox holds a copy of a corpus and a generation, and
-is large; a run holds generated reports. Regenerate one instead of editing it.
-
-## A sandbox
-
-```text
-<workspace>/<name>/
-  sandbox.json      what this harness made, and from where
-  project/          the project root: a real research-rag project, byte for byte
-  xdg/              an empty configuration home for the children a run spawns
-  <arm>/            only for a run: the arm's own directory
-    arm.log         every line this harness emitted for the arm
-    report-<split>.json  the report the app's own harness wrote, per judged split
-    engine/         only for a code arm: the disposable checkout
+<runs>/                                      the run area: small and durable
+└── <run-id>/                                 <specification name>-<timestamp>
+    ├── run.json                             the record
+    ├── judged/<split>.json                  the judged bytes this run measured
+    └── <arm>/                               one directory per arm
+        ├── arm.log                          every command, exit, and output
+        ├── report-<split>.json              the app's harness report, per split
+        ├── engine/                          a code arm's clone of the tree
+        ├── engine-source.json               what the tree held when it was copied
+        ├── engine-source.diff               its uncommitted tracked changes
+        └── patch.diff                       the arm's patch, as applied
 ```
 
-`project/` holds nothing but what the app itself writes, so it is a valid project
-with nothing removed. The record sits beside it because a file this harness added
-to a project root would be a file the app does not know about.
+A run's directory name is never reused. Two runs of one specification are two
+directories, so a dry run, a real run, and a repeated run each keep their own
+reports, logs, and record, and none of them is overwritten by the next.
 
-`xdg/` is empty and is named by `XDG_CONFIG_HOME` for every child a run spawns.
-The app resolves its account-wide settings overlay beneath that variable, so
-pointing it here is what keeps one account's settings out of a measured run. The
-model cache is deliberately **not** relocated: those are immutable binaries, and
-re-deriving them would need a network this harness does not use.
+## The record
 
-### What a copy carries, and what it does not
+`run.json` is one JSON object, schema version 2. It is written on **every** exit of
+a run: success, refusal, interruption, and a guard that could not be closed. A run
+that measured nothing is the case most worth keeping, because its record is what
+says which command refused and where its log is.
 
-The copy is an allowlist. That is the whole rule, and it is why the two exclusions
-below are the only two names this harness has to know.
+| Field | What it holds |
+|---|---|
+| `schema_version` | 2 |
+| `toolkit_version` | the version that wrote it |
+| `verdict` | the one field to read before any number; see below |
+| `run` | name, start, finish, elapsed, directory, and whether the run completed |
+| `error` | the message that stopped the run, verbatim |
+| `interruption` | the interrupt that ended it, if one did |
+| `measured_arm_count` | arms that measured every split they were asked for |
+| `specification` | the specification, as read, with the run identifier |
+| `engine` | root, revision, branch, dirty, and the content digest before and after |
+| `judgments` | each split: its path, its digest, and the copy kept under the run |
+| `source_project` | the source root, the pointed generation, and the guard |
+| `arms` | one entry per arm, including the one that refused |
 
-Carried:
+### `verdict`
 
-- The source directory, every file in it, at the same source-relative path. The
-  directory's name is read from the project's descriptor rather than assumed, so a
-  project whose originals are not in `sources` is copied correctly.
-- The portable review state: the descriptor, the source catalogue, the reviewed
-  metadata, the source exclusions, the passage exclusions, and the bundles
-  directory, each at the name the app gives it.
-- Under the runtime directory: only the selected-generation pointer, and the
-  generation directories the caller named. Empty directories for the logs, the
-  staging area, the failure area, and the gateway's runtime are created, because
-  the app expects them to exist.
-- The `project_id`, because it is what makes every `source_id` in the review files
-  still resolve and a re-ingestion in the sandbox produce the same ids as one in
-  the original would.
+Only `verified` counts as a measurement. It means the source project's bytes were
+identical before and after, every arm measured every split, the engine's own files
+did not move while the arms ran, and nothing stopped the run.
 
-Not carried:
+| Verdict | What it means |
+|---|---|
+| `verified` | all of the above held |
+| `source_project_changed` | the corpus moved; the arms ran against something else |
+| `engine_source_changed` | the engine's own files moved under the run |
+| `interrupted` | the run was interrupted; arms already measured are kept |
+| `incomplete` | some arms measured and at least one refused |
+| `failed` | the run stopped with nothing measured, or the guard could not be closed |
+| `no_arm_measured` | the run completed and no arm measured anything |
 
-- Everything else under the runtime directory. That is the process's id, port,
-  and terminal; the project lock; a build in progress under the staging area; the
-  build journal that names a pending activation; and every generation that was not
-  named. All excluded by construction rather than by a list of names.
-- The runtime pointer that names a relocated runtime directory. It is
-  machine-local, and a copy carrying it would read the original's generations.
+The order is the argument: a moved corpus says more than a moved engine, which
+says more than a stopped run.
 
-A symbolic link anywhere this copies is refused rather than followed or
-recreated. The app refuses a symlinked original and a symlinked settings file, so
-a sandbox holding one would be a project the app cannot measure, and one that
-silently dropped one would be a project that differs from the source in a way no
-record would show.
+### `source_project.guard`
 
-### `sandbox.json`
+| Field | What it holds |
+|---|---|
+| `state` | `unchanged`, `changed`, or `unknown` |
+| `before`, `after` | one digest each: path counts, byte counts, the digest, the excluded paths, and the account registry's digest |
+| `unchanged` | the same answer as `state`, for readers that check one field |
+| `differences` | `added:`, `removed:`, `changed:` per path, and the registry |
+| `error` | why a digest could not be taken, when one could not |
+| `note` | what was excluded and what a change means |
 
-Written with the same rule the app uses for its own records: readable, stable
-key order, and one trailing newline.
+`unknown` is not `unchanged`. It is what the record holds when the closing digest
+could not be taken at all, and nothing is verified from it.
 
-| Field | Type | Meaning |
-|---|---|---|
-| `schema_version` | integer | `1`. |
-| `toolkit_digest` | string | A digest of everything below, so a record cannot be edited without the digest moving. |
-| `name` | string | The one path segment this sandbox is called. |
-| `root` | string | The project root inside the workspace. |
-| `source_root` | string | The originals inside the copy. |
-| `project_id` | string | The identifier the copy shares with the source project. |
-| `generation_ids` | list of string | The generation directories that were copied. |
-| `settings_file` | string | Where a run pins the settings. Nothing has written it yet. |
-| `config_home` | string | The empty configuration home a child is pointed at. |
-| `created_at` | string | UTC, ISO 8601 with microseconds and a `Z`. |
-| `byte_count` | integer | Bytes copied, under the project root. |
-| `file_count` | integer | Files copied, under the project root. |
-| `elapsed_seconds` | number | How long the copy took. |
-| `origin` | object | The source project, the layout read from the app, and the generation the source selected. |
+### `engine`
 
-A directory in a workspace with no `sandbox.json` is not reported by `sandbox
-list` and is not removed by `sandbox remove`. The marker is what makes destruction
-safe.
+`content_sha256` is a digest of the engine tree's `src`, `scripts`, and
+`pyproject.toml`, taken before the arms and again after them. A git revision names
+committed content and says nothing about a file someone is editing, so a code change
+during a run would otherwise be measured and reported as one number.
 
-## A run
+### `arms[]`
 
-```text
-<runs>/<specification-name>-<timestamp>/
-  run.json          the record
-  <arm-name>/
-    arm.log         every line this harness emitted, in order
-    report.json     the report the app's own harness wrote
-    engine/         only for a code arm: the disposable checkout
-```
+Each arm holds `arm` (name, kind, overlay, base, patch, prepare commands), `engine`,
+`checkout`, `sandbox`, `settings`, `environment`, `prepare`, `validate`, `measure`,
+`reports`, `log`, `measured_splits`, `measured`, `failure`, `failure_stage`, and
+`sandbox_removed`. An arm that refused holds the same shape, with whatever it had
+produced and the message that stopped it.
 
-The run directory name carries the specification's name and a timestamp, and a run
-never overwrites an existing one. A run that fails leaves its record: a failure
-with its provenance is more useful than no failure at all.
+### `settings`
 
-### `run.json`
+`values` and `baseline_values` are the resolved settings for the arm and for the
+arm's baseline; `baseline_layers` names the layer each key's value came from before
+the overlay, and `arm_layers` names where each value came from after it, which is
+what the overlay moved. `model_cache_root` is pinned as
+an absolute path so a sandbox reads the shared binaries rather than looking inside
+its own empty configuration home. `document_sha256` is the digest of the file written
+into the sandbox.
 
-| Field | Type | Meaning |
-|---|---|---|
-| `schema_version` | integer | `1`. |
-| `toolkit_version` | string | The installed distribution's version. |
-| `verdict` | string | `verified`, `source_project_changed`, or `no_arm_measured`. |
-| `run` | object | `name`, `started_at`, `finished_at`, `elapsed_seconds`, `directory`. |
-| `specification` | object | The specification as read: path, name, source project, judged set, generations, harness, arm count. |
-| `engine` | object | The tree under test: `root`, `revision`, `branch`, `dirty`, `untracked_file_count`, `harness`, `version`. |
-| `judgments` | list of object | One entry per judged split: `name`, `path`, `sha256`, `byte_count`. |
-| `source_project` | object | `project_root`, `pointed_generation`, and `guard`. |
-| `arms` | list of object | One entry per arm, in the order the specification listed them. |
-| `source_project.guard` | object | `guarded_entries`, `before`, `after`, `unchanged`, `differences`. |
-| `source_project.guard.before` | object | `root`, `file_count`, `byte_count`, `digest`, `elapsed_seconds`. |
-| `arms[].arm` | object | The arm as read: `name`, `kind`, `overlay`, `base`, `patch`, `prepare`. |
-| `arms[].engine` | object | The engine that arm measured through. |
-| `arms[].checkout` | object or null | For a code arm: `root`, `base_revision`, `patch`, `patch_sha256`, `applied_diff`, `dirty_before_patch`, `elapsed_seconds`. |
-| `arms[].sandbox` | object | The sandbox as `sandbox.json` describes it. |
-| `arms[].settings` | object | `key_count`, `document_sha256`, `overridden`, `layers`, `values`, `written_to`, `config_home`. |
-| `arms[].settings.layers` | object | Which layer each baseline value came from, keyed by setting name. |
-| `arms[].prepare` | list of object | One entry per preparation command: `command`, `exit_code`, `elapsed_seconds`, `stdout`, `stderr`. |
-| `arms[].validate` | list of object | One entry per split's validation pass: `stage`, `split`, `command`, `exit_code`, `elapsed_seconds`, `stdout`, `stderr`. |
-| `arms[].measure` | list of object | One entry per split's measurement: the same fields as a validation entry, plus `report`. |
-| `arms[].reports` | object | Each split's report path, keyed by split name. |
-| `arms[].log` | string | Where the arm's log was written. |
+### `environment`
 
-`layers` is a map from a setting's dotted name to the layer that supplied its
-baseline value. The layer names are the app's own, read from
-`research_rag.project.settings_layers`, and they are recorded rather than
-re-spelled here so a rename in the app does not leave this file asserting a layer
-that no longer exists.
+Names dropped, names set, and nothing else: a full environment would copy whatever
+the reader's shell held.
 
-## The guard
+## Reading an older record
 
-The guard covers two entries beneath a project root, and they are the two the app
-owns: the originals and every piece of state derived from them.
-
-A digest is the SHA-256 of every regular file's relative path, its size, and its
-content digest, folded together in sorted path order. A rename and a rewrite are
-therefore different changes, and neither can pass as the other. A path that is a
-symbolic link, a socket, or anything that is not a regular file is skipped rather
-than followed, so a link out of the project cannot make the guard read outside it.
-A guarded entry that is itself a symlink is refused.
-
-Two projects holding the same bytes have the same digest, which is what lets a
-digest printed on one machine be compared on another. Comparing two snapshots of
-different roots is refused rather than read as "everything changed", which would be
-indistinguishable from a rewrite.
-
-## The pinned settings file
-
-A run writes one file into each sandbox, at the path the app's own
-`project_config_path` names, naming every setting the engine under test declares:
-
-```toml
-# Written by rag-experiments. Every setting the engine under test declares
-# is named here, so an arm's measurement cannot be moved by the account
-# overlay, an environment variable, or a later change to a packaged
-# default. An arm's overlay is already applied to these values.
-
-[chunking]
-headers = false
-overlap = 64
-size = 384
-
-[retrieval]
-rrf_k = 120
-```
-
-Its format is TOML because that is what the app's settings layers read, and the
-value domain is the app's own setting kinds, so each value is a basic string,
-integer, float, or boolean. `tests/test_engine.py` reads a written file back
-through the app's own layer machinery rather than parsing it here, so a document
-this repository could write and the app could not read would fail a test.
-
-## Judged splits
-
-A specification's `judgments` is either one path, read under the split name `all`,
-or a list of `{"name", "path"}`. Each split is validated and then measured with the
-same arms, and each writes `report-<split>.json` beside the arm's log. A split name
-is a record key and a printed label, so it is not trusted to be a safe file name:
-anything outside a plain word becomes a hyphen, and the record keeps the name the
-specification wrote.
-
-Two splits in one run exist because a development number and a held-out number are
-only comparable when the same arms produced both. Two specifications listing the
-same arms can drift apart between two runs, and the drift is invisible in the
-numbers.
-
-## The validation pass
-
-Before any search, each arm asks the app's harness to resolve every judged target
-in every split. A target that does not resolve uniquely would make every number
-for that split meaningless, so the run stops there rather than after an hour of
-inference. The pass runs through the app's own `--validate-only` flag, so the
-resolution rule is the app's and not a second copy of it.
-
-The outcome of every pass is in the record under `arms[].validate` and is printed
-per arm and per split, so a target that fails to resolve is named rather than
-summarised away. The app's harness stops at the first unresolved target, so a set
-with several unresolvable targets reports the first and the rest are found on the
-next run; collecting them all at once is a change to the app's harness.
+A record written before this layout keeps its own paths, and they are absolute, so
+`rag-experiments compare` still reads them where they are. A record written by an
+earlier schema has no `verdict` this file lists, and its `source_project.guard` has
+no `state`: `compare` says so rather than presenting it as verified.

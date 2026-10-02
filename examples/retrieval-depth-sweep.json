@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
   "name": "retrieval-depth-sweep",
-  "source_project": "/home/ahmed/Documents/projects/ai-and-fetishism",
-  "judgments": "/home/ahmed/Documents/ultra-rag-mcp-servers/research-rag/evaluation/ai-and-fetishism-queries.json",
+  "source_project": "../../evaluation-project",
+  "judgments": "../judgments/partitions/exploratory-a-queries.json",
   "generations": [],
   "harness": {
     "top_k": 10,
@@ -11,23 +11,23 @@
       "hybrid",
       "hybrid+rerank"
     ],
-    "offline": true,
-    "skip_targets": [
-      "t12"
-    ]
+    "offline": true
   },
   "arms": [
     {
       "name": "baseline",
       "kind": "settings",
-      "overlay": {}
+      "overlay": {
+        "retrieval.minimum_candidates": 40,
+        "retrieval.maximum_candidates": 40
+      }
     },
     {
-      "name": "wider-candidates",
+      "name": "depth-80",
       "kind": "settings",
       "overlay": {
         "retrieval.minimum_candidates": 80,
-        "retrieval.maximum_candidates": 160
+        "retrieval.maximum_candidates": 80
       }
     }
   ]

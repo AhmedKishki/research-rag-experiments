@@ -12,17 +12,29 @@ from .copy import (
     pin_settings,
     remove,
 )
-from .guard import GUARDED_ENTRIES, Snapshot, differences, snapshot
+from .guard import (
+    DIRECTORY,
+    FILE,
+    LINK,
+    Snapshot,
+    differences,
+    snapshot,
+    volatile_paths,
+)
 from .layout import (
     ProjectLayout,
     existing_generations,
     read_layout,
+    refuse_nested,
+    relocated_runtime_of,
     selected_generation,
 )
 
 __all__ = [
     "CONFIG_HOME_DIRECTORY",
-    "GUARDED_ENTRIES",
+    "DIRECTORY",
+    "FILE",
+    "LINK",
     "PROJECT_DIRECTORY",
     "SANDBOX_RECORD",
     "ProjectLayout",
@@ -34,7 +46,10 @@ __all__ = [
     "list_sandboxes",
     "pin_settings",
     "read_layout",
+    "refuse_nested",
+    "relocated_runtime_of",
     "remove",
     "selected_generation",
     "snapshot",
+    "volatile_paths",
 ]

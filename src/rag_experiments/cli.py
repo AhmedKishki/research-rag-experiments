@@ -1,441 +1,472 @@
-"""The one command, and the four jobs it does.
+"""The one command.
 
-Every subcommand is a verb on an experiment or on the state one left behind. The
-command line reads; it never writes a research-rag project, never computes a
-quality metric, and never decides that a run succeeded. A condition a reader must
-act on exits non-zero with the reason and the command that fixes it, which is the
-same rule the app under test follows so the two reports read alike.
+Every command here is a status, a refusal with the reason, or the name of a file a
+reader should open. The statuses are the record's verdicts, so a caller can tell a
+run that measured nothing from one that refused, and neither is ever reported as
+the exit code for a completed measurement.
+
+A failed run exits non-zero and prints where its record is. That is the whole
+point of writing a record on every exit: the numbers that did arrive, the command
+that stopped the run, and the log that holds the output are all one path away.
 """
 
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import sys
 from pathlib import Path
-from typing import Any
 
 from . import toolkit_version
-from .engine.locate import EngineSource, locate_engine
+from .engine import locate_engine
 from .errors import ExperimentError
 from .experiment import load_spec
-from .report import compare, read_record
-from .report.record import VERDICT_SOURCE_CHANGED
-from .run import run_experiment
-from .sandbox import create as create_sandbox
-from .sandbox import list_sandboxes, read_layout, selected_generation, snapshot
-from .sandbox import remove as remove_sandbox
+from .report import VERDICT_ENGINE_CHANGED, VERDICT_SOURCE_CHANGED
+from .report.compare import render_comparison
+from .report.record import (
+    RECORD_NAME,
+    VERDICT_INCOMPLETE,
+    VERDICT_INTERRUPTED,
+    VERDICT_VERIFIED,
+    read_record,
+)
+from .run import new_run_id, run_experiment
+from .sandbox import (
+    create,
+    list_sandboxes,
+    read_layout,
+    remove,
+    snapshot,
+    volatile_paths,
+)
+from .sandbox import selected_generation as pointed_generation
 
-#: What the command is called, matching the distribution and the entry point.
 PROGRAM = "rag-experiments"
 
-#: Where a run's sandboxes go unless the caller says otherwise, relative to the
-#: current directory. A sandbox is a large copy of a corpus, so the default is a
-#: directory a reader can see is disposable.
-DEFAULT_WORKSPACE = Path("workspaces")
-
-#: Where run records go unless the caller says otherwise.
-DEFAULT_RUNS = Path("runs")
-
 #: The variable that names the engine under test for a machine that keeps its
-#: research-rag checkout somewhere this repository cannot know. It is the same name
-#: the tests use, and it is read by `--version` so the answer is the engine a run
-#: would measure rather than a guess from the working directory.
+#: research-rag checkout somewhere this repository cannot know. `--version` reads
+#: it, so the answer is the engine a run would measure rather than a guess from the
+#: working directory.
 APP_SOURCE_ENV = "RESEARCH_RAG_APP_SOURCE"
 
-#: The exit status a run whose source project changed carries. It is not 1,
-#: because 1 is a refusal and a run that measured nothing against a moved corpus
-#: is a different condition: the arms ran, and the corpus they claim to have
-#: measured is not the one that exists.
+#: A run whose source project's bytes moved is not a measurement, whatever its
+#: numbers say, and it has its own status so a caller can tell that apart from a
+#: run that refused to start.
 EXIT_SOURCE_CHANGED = 3
 
-#: The exit status for a run that completed and left the source project alone.
+#: A run whose engine files moved under it is the same kind of disqualification and
+#: is likewise its own status.
+EXIT_ENGINE_CHANGED = 4
+
+#: A run that stopped part-way: some arms measured, some did not.
+EXIT_INCOMPLETE = 2
+
+#: The exit code for a run that completed its measurement, and for every command
+#: whose success is the absence of a problem.
 EXIT_VERIFIED = 0
 
 
-def _parser() -> argparse.ArgumentParser:
+def main(argv: list[str] | None = None) -> int:
+    # Parent-side layout/registry inspection also imports the editable app.
+    # Child-only suppression still writes caches during a cold CLI inspection.
+    sys.dont_write_bytecode = True
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.version:
+        return _version()
+    if args.command is None:
+        # No command is not a refusal: the help is the answer, and it is what a
+        # reader who typed the command name alone is asking for.
+        parser.print_help()
+        return EXIT_VERIFIED
+    try:
+        if args.command == "run":
+            return _run(args)
+        if args.command == "sandbox":
+            return _sandbox(args)
+        if args.command == "compare":
+            return _compare(args)
+        if args.command == "verify":
+            return _verify(args)
+        return _inspect(args)  # inspect: the default command when one is named
+    except (ExperimentError, FileNotFoundError, ValueError) as exc:
+        print(f"{PROGRAM}: {exc}", file=sys.stderr)
+        return 1
+
+
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog=PROGRAM,
         description=(
-            "Measure research-rag retrieval in an isolated copy of a project. "
-            "An experiment never writes inside the project it measures, and a "
-            "run that changed it says so instead of reporting numbers."
-        ),
-        epilog=(
-            "Start with: "
-            f"{PROGRAM} inspect --project PATH, then {PROGRAM} run --spec FILE.json"
+            "Measure research-rag retrieval arms against a project, in disposable "
+            "copies, and leave one record per run."
         ),
     )
     parser.add_argument(
-        "--version",
-        action="store_true",
-        help="Print this toolkit's version and the engine it will find.",
+        "--version", action="store_true", help="Print version and exit."
     )
     commands = parser.add_subparsers(dest="command")
 
-    inspect = commands.add_parser(
-        "inspect",
-        help="Say what a project holds and what a run would copy from it.",
-    )
-    inspect.add_argument(
-        "--project", type=Path, required=True, help="The project root to read."
-    )
-
-    sandbox = commands.add_parser(
-        "sandbox", help="Create, list, and remove the disposable copies."
-    )
-    sandbox_commands = sandbox.add_subparsers(dest="sandbox_command")
-
-    make = sandbox_commands.add_parser(
-        "create", help="Copy a project into a workspace, and print where it went."
-    )
-    make.add_argument("--project", type=Path, required=True)
-    make.add_argument(
-        "--workspace", type=Path, default=DEFAULT_WORKSPACE, help="Where the copy goes."
-    )
-    make.add_argument("--name", required=True, help="One path segment naming the copy.")
-    make.add_argument(
-        "--generation",
-        action="append",
-        default=[],
-        help="A generation to copy. Repeatable. Default: the one the project selects.",
-    )
-
-    listing = sandbox_commands.add_parser(
-        "list", help="List the copies in a workspace."
-    )
-    listing.add_argument("--workspace", type=Path, default=DEFAULT_WORKSPACE)
-
-    drop = sandbox_commands.add_parser(
-        "remove", help="Delete a copy this harness made."
-    )
-    drop.add_argument("--workspace", type=Path, default=DEFAULT_WORKSPACE)
-    drop.add_argument("--name", required=True)
-
-    guard = commands.add_parser(
-        "verify",
-        help=(
-            "Digest a project and, with --expect, compare it to a digest printed "
-            "earlier. Writes nothing."
-        ),
-    )
-    guard.add_argument("--project", type=Path, required=True)
-    guard.add_argument("--expect", help="A digest to compare against.")
-
-    run = commands.add_parser(
-        "run", help="Measure every arm of a specification and write one record."
-    )
-    run.add_argument("--spec", type=Path, required=True, help="The run specification.")
+    run = commands.add_parser("run", help="Measure every arm of a specification.")
+    # `run` takes no `--project`: the specification names the project it measures,
+    # and a second source of truth for it would be one more thing to disagree.
+    _add_app_source_argument(run)
     run.add_argument(
-        "--app-source",
+        "--spec", type=Path, required=True, help="Run specification JSON file."
+    )
+    run.add_argument(
+        "--workspace",
         type=Path,
         required=True,
-        help=(
-            "The research-rag tree to measure. Its revision is named in the "
-            "record, and a code arm is copied from it."
-        ),
-    )
-    run.add_argument("--workspace", type=Path, default=DEFAULT_WORKSPACE)
-    run.add_argument("--runs", type=Path, default=DEFAULT_RUNS)
-    run.add_argument(
-        "--no-keep-sandboxes",
-        action="store_true",
-        help="Delete each sandbox once its arm has been measured.",
+        help="Directory the run's sandboxes are made in.",
     )
     run.add_argument(
-        "--no-validate",
-        action="store_true",
-        help=(
-            "Measure without the app's validation pass first. A judged target "
-            "that cannot be resolved then costs an hour of inference before it "
-            "is found."
-        ),
+        "--runs",
+        type=Path,
+        required=True,
+        help="Directory the run's own directory is created under.",
     )
     run.add_argument(
         "--dry-run",
         action="store_true",
+        help="Prepare every arm and measure nothing. No record is written.",
+    )
+    run.add_argument(
+        "--no-keep-sandboxes",
+        dest="keep_sandboxes",
+        action="store_false",
         help=(
-            "Materialize each arm's sandbox, pin its settings, and stop. This is "
-            "the check to run before an expensive run."
+            "Remove each arm's sandbox when its measurement succeeds. Reports, "
+            "logs, and checkouts stay in the run's directory."
+        ),
+    )
+    run.add_argument(
+        "--no-validate",
+        dest="validate_first",
+        action="store_false",
+        help=(
+            "Skip the harness's own validation pass, which resolves every judged "
+            "target before any search runs."
         ),
     )
 
-    show = commands.add_parser("compare", help="Print a run's arms side by side.")
-    show.add_argument("--run", type=Path, required=True, help="A run directory.")
-    show.add_argument(
-        "--mode",
-        action="append",
-        default=[],
-        help="A mode to tabulate. Repeatable. Default: every mode the run reported.",
+    verify = commands.add_parser(
+        "verify", help="Digest a project and compare the digest."
     )
-    show.add_argument(
-        "--split",
-        help="One judged split to tabulate. Default: every split the run reported.",
+    _add_source_arguments(verify)
+    verify.add_argument(
+        "--expect",
+        help=(
+            "Digest to compare against. Omit it to print the project's digest "
+            "without writing anything."
+        ),
     )
-    show.add_argument("--json", action="store_true", help="Print the record instead.")
+
+    inspect = commands.add_parser(
+        "inspect", help="Report what a run would copy, without copying it."
+    )
+    _add_source_arguments(inspect)
+
+    compare = commands.add_parser(
+        "compare", help="Print the comparison table for a run."
+    )
+    compare.add_argument(
+        "--run", type=Path, required=True, help="Directory holding a run record."
+    )
+    compare.add_argument(
+        "--json", action="store_true", help="Print the record instead."
+    )
+    compare.add_argument(
+        "--modes", default="", help="Comma-separated modes to tabulate."
+    )
+    compare.add_argument("--split", default=None, help="One split to tabulate.")
+
+    sandbox = commands.add_parser(
+        "sandbox", help="Create, list, and remove a project's copy by hand."
+    )
+    sandbox_sub = sandbox.add_subparsers(dest="sandbox_command")
+    sandbox_create = sandbox_sub.add_parser("create", help="Copy a project.")
+    _add_source_arguments(sandbox_create)
+    sandbox_create.add_argument("--workspace", type=Path, required=True)
+    sandbox_create.add_argument("--name", required=True)
+    sandbox_remove = sandbox_sub.add_parser("remove", help="Remove a copy.")
+    sandbox_remove.add_argument("--workspace", type=Path, required=True)
+    sandbox_remove.add_argument("--name", required=True)
+    sandbox_list = sandbox_sub.add_parser(
+        "list", help="List the copies in a workspace."
+    )
+    sandbox_list.add_argument("--workspace", type=Path, required=True)
+
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:
-    """Run the command, and turn a condition into a status and one message."""
+def _add_source_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--project", type=Path, required=True, help="The source project to measure."
+    )
+    _add_app_source_argument(parser)
 
-    parser = _parser()
-    args = parser.parse_args(argv)
-    if getattr(args, "version", False) and not args.command:
-        return _version()
-    if not args.command:
-        parser.print_help()
-        return EXIT_VERIFIED
-    try:
-        if args.command == "inspect":
-            return _inspect(args)
-        if args.command == "sandbox":
-            return _sandbox(args)
-        if args.command == "verify":
-            return _verify(args)
-        if args.command == "run":
-            return _run(args)
-        if args.command == "compare":
-            return _compare(args)
-    except ExperimentError as exc:
-        print(f"{PROGRAM}: {exc}", file=sys.stderr)
-        return 1
-    except FileNotFoundError as exc:
-        print(f"{PROGRAM}: {exc}", file=sys.stderr)
-        return 1
-    parser.print_help()
-    return EXIT_VERIFIED
+
+def _add_app_source_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--app-source",
+        type=Path,
+        default=None,
+        help=(
+            "The research-rag tree to measure. Defaults to "
+            "$RESEARCH_RAG_APP_SOURCE, then to the installed app."
+        ),
+    )
 
 
 def _version() -> int:
     """Print this toolkit's version and the engine a run would measure.
 
-    The engine is the one the environment names, or the working directory if that
-    is itself a checkout. Saying "not found" with the flag that fixes it is more
-    useful than a path that happens to be a directory.
+    The engine is the one the environment names, then the installed app's own
+    checkout. Saying "not found" with the flag that fixes it is more useful than a
+    path that happens to be a directory, and the content digest is printed because a
+    revision names committed work while a measurement reads the files on disk.
     """
 
     print(f"{PROGRAM} {toolkit_version()}")
     named = os.environ.get(APP_SOURCE_ENV, "").strip()
     try:
-        engine = locate_engine(Path(named) if named else Path.cwd())
+        engine = locate_engine(Path(named) if named else _engine_from_environment())
     except ExperimentError:
         print(
-            "engine: not found; pass --app-source, or set "
-            f"{APP_SOURCE_ENV} at a research-rag checkout"
+            f"engine: not found; pass --app-source, or set {APP_SOURCE_ENV} at a "
+            "research-rag checkout"
         )
         return EXIT_VERIFIED
     described = engine.describe()
-    state = "clean" if described["dirty"] is False else "dirty"
+    revision = described.get("revision")
+    state = "clean" if described.get("dirty") is False else "dirty"
+    digest = str(described.get("content_sha256") or "")[:16]
     print(
-        f"engine: {described['revision'] or 'no revision'} "
-        f"({described['branch'] or 'no branch'}, {state}) at {described['root']}"
+        f"engine: {revision or 'no revision'} "
+        f"({described.get('branch') or 'no branch'}, {state}) at {described['root']}, "
+        f"content {digest or 'none'}"
     )
     return EXIT_VERIFIED
 
 
-def _inspect(args: argparse.Namespace) -> int:
-    """Say what a project holds, and what a copy of it would carry."""
+def _engine_from_environment() -> Path:
+    from .engine.locate import PACKAGE_RELATIVE
 
-    layout = read_layout(args.project)
-    pointed = selected_generation(layout)
-    from .sandbox import existing_generations
+    override = os.environ.get(APP_SOURCE_ENV)
+    if override:
+        return Path(override)
+    # The installed package's own location, walked up to the tree that holds it,
+    # which is the only place this harness can name an engine it was not given.
+    import research_rag
 
-    others = [item for item in existing_generations(layout) if item != pointed]
-    lines = [
-        ("project root", layout.root),
-        ("originals", layout.source_root),
-        ("review state", layout.portable_root),
-        ("runtime", layout.state_root),
-        ("selected generation", pointed),
-        ("other generations", ", ".join(others) if others else "none"),
-    ]
-    width = max(len(label) for label, _ in lines) + 2
-    for label, value in lines:
-        print(f"{label + ':':<{width}}{value}")
-    print()
-    print(
-        "copied runtime:   the selected-generation pointer and the named "
-        "generations only; process state, a project lock, and a build journal "
-        "are not carried"
-    )
-    print("never written:    the project above, and the account's project registry")
-    return EXIT_VERIFIED
-
-
-def _sandbox(args: argparse.Namespace) -> int:
-    if not args.sandbox_command:
-        print(f"{PROGRAM} sandbox: say create, list, or remove", file=sys.stderr)
-        return 1
-    if args.sandbox_command == "create":
-        sandbox = create_sandbox(
-            args.workspace,
-            name=args.name,
-            source=args.project,
-            generations=tuple(args.generation),
-        )
-        print(f"sandbox: {sandbox.root}")
-        print(f"  project id: {sandbox.project_id}")
-        print(f"  generations: {', '.join(sandbox.generation_ids)}")
-        print(
-            f"  copied {sandbox.file_count} files, {sandbox.byte_count} bytes in "
-            f"{sandbox.elapsed_seconds:.1f} s"
-        )
-        print(f"  record: {sandbox.record_path}")
-        print(
-            "  settings are not pinned yet; a run pins them, and "
-            "`rag-experiments run --dry-run` will do that without measuring"
-        )
-        return EXIT_VERIFIED
-    if args.sandbox_command == "list":
-        found = list_sandboxes(args.workspace)
-        if not found:
-            print(f"no sandboxes in {args.workspace}")
-            return EXIT_VERIFIED
-        print(f"{'name':<28}{'project id':<40}{'generations':<12}bytes")
-        for entry in found:
-            print(
-                f"{entry.get('name', '?'):<28}{entry.get('project_id', '?'):<40}"
-                f"{len(entry.get('generation_ids') or []):<12}"
-                f"{entry.get('byte_count', 0)}"
-            )
-        return EXIT_VERIFIED
-    removed = remove_sandbox(args.workspace, args.name)
-    print(f"removed {removed}")
-    return EXIT_VERIFIED
-
-
-def _verify(args: argparse.Namespace) -> int:
-    """Digest a project, and say whether it matches a digest printed before.
-
-    This is the standalone form of the guard a run takes on its own: it is what a
-    reader runs to confirm a project is byte-identical after work that was not
-    done through this harness.
-    """
-
-    taken = snapshot(args.project)
-    described = taken.describe()
-    if not args.expect:
-        print(f"{described['file_count']} files, {described['byte_count']} bytes")
-        print(f"digest: {described['digest']}")
-        print(f"took {described['elapsed_seconds']} s")
-        return EXIT_VERIFIED
-    if taken.digest() == args.expect:
-        print(f"unchanged: {described['digest']}")
-        return EXIT_VERIFIED
-    print(
-        f"{PROGRAM}: this project is not the one with digest {args.expect}; it is "
-        f"{described['digest']}",
-        file=sys.stderr,
-    )
-    return EXIT_SOURCE_CHANGED
+    installed = Path(research_rag.__file__).resolve()
+    for parent in installed.parents:
+        if (parent / PACKAGE_RELATIVE).is_file():
+            return parent
+    return installed.parent
 
 
 def _run(args: argparse.Namespace) -> int:
     spec = load_spec(args.spec)
-    engine = locate_engine(args.app_source)
+    engine = locate_engine(args.app_source or _engine_from_environment())
     if args.dry_run:
-        return _dry_run(spec, engine, args)
-
+        return _dry_run(args, spec, engine)
     outcome = run_experiment(
         spec,
         app_source=engine,
         workspace=args.workspace,
         runs_directory=args.runs,
-        keep_sandboxes=not args.no_keep_sandboxes,
-        validate_first=not args.no_validate,
+        keep_sandboxes=args.keep_sandboxes,
+        validate_first=args.validate_first,
     )
+    _report(outcome)
     print(outcome.comparison)
-    print()
     print(f"record: {outcome.record_path}")
-    print(f"verdict: {outcome.verdict}")
-    _report_validation(outcome)
-    if outcome.verdict == VERDICT_SOURCE_CHANGED:
-        guard = outcome.record["source_project"]["guard"]
-        print(
-            f"{PROGRAM}: the source project changed during this run, so its numbers "
-            f"do not describe the corpus on disk: "
-            f"{', '.join(guard['differences'][:8])}",
-            file=sys.stderr,
-        )
-        return EXIT_SOURCE_CHANGED
-    return EXIT_VERIFIED
+    return _status_for(outcome.verdict)
 
 
-def _report_validation(outcome: Any) -> None:
-    """Say whether every judged target resolved, per arm and per split.
+def _dry_run(args: argparse.Namespace, spec: object, engine: object) -> int:
+    """Prepare every arm and measure nothing.
 
-    The plan asks for every target-resolution failure to be logged rather than
-    summarised away, so an arm that resolved everything says so and an arm that
-    did not is named with the log that holds the message.
+    A dry run gets its own run identifier and its own workspace prefix, like a real
+    run, so the real run after it cannot collide with what this one created.
     """
 
-    for result in outcome.results:
-        for item in result.validate:
-            if item.exit_code == 0:
-                print(
-                    f"validate {result.arm.name} / {item.split}: "
-                    f"every judged target resolved"
-                )
-            else:
-                print(
-                    f"validate {result.arm.name} / {item.split}: exit "
-                    f"{item.exit_code}; see {result.log_path}"
-                )
+    from .experiment import ArmFailure, prepare_arm
+    from .experiment.spec import segment
 
-
-def _dry_run(spec: Any, engine: EngineSource, args: argparse.Namespace) -> int:
-    """Materialize and pin every arm, then stop before anything is measured.
-
-    This is the check that answers "can this run start?" without spending an
-    hour. It is the same preparation a real run performs, so what it refuses is
-    what a real run would refuse: a missing original, a missing generation, an
-    unknown setting, an out-of-range value, or a patch that does not apply.
-    """
-
-    from .experiment.execute import prepare_arm
-
+    runs = Path(args.runs).expanduser().resolve()
+    run_id = new_run_id(f"{spec.name}-dry-run", runs)
     workspace = Path(args.workspace).expanduser().resolve()
-    runs = Path(args.runs).expanduser().resolve() / "dry-run"
     for arm in spec.arms:
-        prepared = prepare_arm(
-            spec,
-            arm,
-            workspace=workspace,
-            run_directory=runs,
-            app_source=engine,
-        )
-        print(f"arm {arm.name}: {prepared.sandbox.root}")
-        print(f"  engine: {prepared.engine.root}")
-        print(
-            f"  settings: {prepared.settings['key_count']} pinned, "
-            f"{len(prepared.settings['overridden'])} overridden"
-        )
-        print(f"  generations: {', '.join(prepared.sandbox.generation_ids)}")
-        if prepared.checkout is not None:
-            print(
-                f"  checkout: base {prepared.checkout.base_revision}, diff "
-                f"{len(prepared.checkout.resulting_diff)} bytes"
+        arm_directory = runs / run_id / segment(arm.name)
+        try:
+            prepared = prepare_arm(
+                spec,
+                arm,
+                workspace=workspace,
+                sandbox_name=f"{run_id}-{segment(arm.name)}",
+                arm_directory=arm_directory,
+                app_source=engine,
             )
-    print()
-    print(
-        "dry run complete. Nothing was measured and the source project was not written."
-    )
+        except (ArmFailure, ExperimentError) as exc:
+            print(f"arm {arm.name}: refused", file=sys.stderr)
+            print(f"  {exc}", file=sys.stderr)
+            return 1
+        print(f"arm {arm.name}: {arm.kind}")
+        print(f"  sandbox:   {prepared.sandbox.root}")
+        print(f"  engine:    {prepared.engine.root}")
+        if prepared.checkout is not None:
+            print(f"  checkout:  base {prepared.checkout.base_revision}")
+        print(f"  settings:  {prepared.settings['document_sha256'][:16]}")
+        print(f"  log:       {prepared.log_path}")
+    print(f"Nothing was measured. Run directory (prepared, no record): {runs / run_id}")
     return EXIT_VERIFIED
+
+
+def _status_for(verdict: str) -> int:
+    if verdict == VERDICT_VERIFIED:
+        return EXIT_VERIFIED
+    if verdict == VERDICT_SOURCE_CHANGED:
+        return EXIT_SOURCE_CHANGED
+    if verdict == VERDICT_ENGINE_CHANGED:
+        return EXIT_ENGINE_CHANGED
+    if verdict in {VERDICT_INCOMPLETE, VERDICT_INTERRUPTED}:
+        return EXIT_INCOMPLETE
+    return 1
+
+
+def _report(verdict: str) -> None:
+    if verdict == VERDICT_VERIFIED:
+        return
+    print(
+        f"{PROGRAM}: this run is not a verified measurement: {verdict}", file=sys.stderr
+    )
+
+
+def _sandbox(args: argparse.Namespace) -> int:
+    command = getattr(args, "sandbox_command", None)
+    if command == "create":
+        engine = locate_engine(args.app_source or _engine_from_environment())
+        sandbox = create(
+            args.workspace, name=args.name, source=args.project, generations=()
+        )
+        print(f"sandbox {sandbox.name}: {sandbox.root}")
+        print(f"  generations: {', '.join(sandbox.generation_ids)}")
+        print(f"  project id:  {sandbox.project_id}")
+        print(f"  settings:    {sandbox.settings_file} (not written yet)")
+        print(f"  engine:      {engine.root}")
+        print(f"  record:      {sandbox.record_path}")
+        print(
+            "  A copy is addressed by path and is never registered: `research-rag "
+            "init` would evict the original's record in the account's project "
+            "registry."
+        )
+        return EXIT_VERIFIED
+    if command == "remove":
+        removed = remove(args.workspace, args.name)
+        print(f"removed {removed}")
+        return EXIT_VERIFIED
+    if command == "list":
+        found = list_sandboxes(args.workspace)
+        if not found:
+            print("no sandboxes in this workspace")
+            return EXIT_VERIFIED
+        for entry in found:
+            print(
+                f"{entry['name']}: {entry['root']}\n"
+                f"  project id:  {entry.get('project_id')}\n"
+                f"  generations: {', '.join(entry.get('generation_ids') or [])}"
+            )
+        return EXIT_VERIFIED
+    print(
+        "sandbox takes create, list, or remove: it makes and destroys a project's "
+        "copy by hand, and every run makes its own.",
+        file=sys.stderr,
+    )
+    return 1
+
+
+def _verify(args: argparse.Namespace) -> int:
+    before = snapshot(args.project)
+    if args.expect is None:
+        print(f"{args.project}: {before.digest()}")
+        print(
+            f"{before.path_count} paths, {before.byte_count} bytes, "
+            f"{len(before.unreadable)} unreadable"
+        )
+        return EXIT_VERIFIED
+    if before.digest() == args.expect:
+        print(f"{args.project}: unchanged since the digest {args.expect}")
+        return EXIT_VERIFIED
+    print(
+        f"{args.project}: is not the one with digest {args.expect}; it is now "
+        f"{before.digest()}",
+        file=sys.stderr,
+    )
+    return EXIT_SOURCE_CHANGED
 
 
 def _compare(args: argparse.Namespace) -> int:
     record = read_record(args.run)
     if args.json:
+        import json
+
         print(json.dumps(record, indent=2, ensure_ascii=False))
-        return EXIT_VERIFIED
-    print(compare.render_comparison(record, tuple(args.mode), args.split))
-    verdict = str(record.get("verdict") or "")
-    if verdict == VERDICT_SOURCE_CHANGED:
-        return EXIT_SOURCE_CHANGED
+        return _status_for(str(record.get("verdict") or ""))
+    print(
+        render_comparison(
+            record,
+            modes=tuple(item.strip() for item in args.modes.split(",") if item.strip()),
+            split=args.split,
+        )
+    )
+    return _status_for(str(record.get("verdict") or ""))
+
+
+def _inspect(args: argparse.Namespace) -> int:
+    layout = read_layout(args.project)
+    pointed = pointed_generation(layout)
+    print(f"project:      {layout.root}")
+    print(f"originals:    {layout.source_root}")
+    print(f"review state: {layout.portable_root}")
+    print(f"derived:      {layout.state_root}")
+    if layout.relocated_runtime is not None:
+        print(
+            f"  the project relocated its own derived state to {layout.relocated_runtime}"
+        )
+    print(f"generation:   {pointed}")
+    print(f"settings:     {layout.root / layout.settings_relative}")
+    print(
+        f"generations:  {', '.join(sorted(_names(layout.generations_root))) or 'none'}"
+    )
+    print("  guarded: every path in the project, including the generations, the")
+    print("  review state, and any file at the root, except the process state a")
+    print(f"  serving app rewrites on its own: {', '.join(volatile_paths())}")
+    print("  a copy carries none of that, and creates the runtime's empty")
+    print(f"  directories itself: {', '.join(layout.empty_runtime_directories)}")
+    print("  any other change during a run, by the app or by a person, disqualifies it")
+    print(
+        f"A run copies the originals, the review state, and generation {pointed}, and "
+        "writes every byte it produces inside the directories it was given. The "
+        "account's project registry is never written: a copy is addressed by path."
+    )
     return EXIT_VERIFIED
 
 
-if __name__ == "__main__":
-    raise SystemExit(main())
+def _names(root: Path) -> list[str]:
+    return [path.name for path in root.iterdir()] if root.is_dir() else []
+
+
+__all__ = [
+    "APP_SOURCE_ENV",
+    "EXIT_ENGINE_CHANGED",
+    "EXIT_INCOMPLETE",
+    "EXIT_SOURCE_CHANGED",
+    "EXIT_VERIFIED",
+    "PROGRAM",
+    "RECORD_NAME",
+    "build_parser",
+    "main",
+]

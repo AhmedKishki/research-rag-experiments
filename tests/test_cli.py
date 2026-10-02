@@ -14,14 +14,34 @@ from pathlib import Path
 import pytest
 from conftest import FIRST_GENERATION
 
-from rag_experiments.cli import EXIT_SOURCE_CHANGED, EXIT_VERIFIED, main
-from rag_experiments.report.record import RECORD_NAME, VERDICT_VERIFIED
+from rag_experiments.cli import (
+    EXIT_ENGINE_CHANGED,
+    EXIT_INCOMPLETE,
+    EXIT_SOURCE_CHANGED,
+    EXIT_VERIFIED,
+    main,
+)
+from rag_experiments.report.record import (
+    RECORD_NAME,
+    VERDICT_ENGINE_CHANGED,
+    VERDICT_INCOMPLETE,
+    VERDICT_VERIFIED,
+)
 from rag_experiments.sandbox import create, list_sandboxes, snapshot
 
 
 def test_no_arguments_prints_the_help(capsys: pytest.CaptureFixture[str]) -> None:
     assert main([]) == EXIT_VERIFIED
     assert "rag-experiments" in capsys.readouterr().out
+
+
+def test_parent_cli_disables_bytecode_before_app_inspection(monkeypatch, capsys):
+    import sys
+
+    monkeypatch.setattr(sys, "dont_write_bytecode", False)
+    assert main(["--version"]) == EXIT_VERIFIED
+    capsys.readouterr()
+    assert sys.dont_write_bytecode is True
 
 
 def test_the_version_names_the_engine_the_environment_points_at(
@@ -37,11 +57,31 @@ def test_the_version_names_the_engine_the_environment_points_at(
     assert "no revision" not in out
 
 
+def test_the_version_names_the_installed_engine_when_nothing_names_one(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    app_source: Path,
+) -> None:
+    # With no override, the engine a run would measure is the one holding the
+    # installed package, which is the answer a reader on this machine wants.
+    monkeypatch.delenv("RESEARCH_RAG_APP_SOURCE", raising=False)
+    monkeypatch.chdir(tmp_path)
+    assert main(["--version"]) == EXIT_VERIFIED
+    out = capsys.readouterr().out
+    assert "engine: " in out
+    assert str(app_source) in out
+    assert "content " in out
+
+
 def test_the_version_names_its_own_remedy_when_there_is_no_engine(
     capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.delenv("RESEARCH_RAG_APP_SOURCE", raising=False)
-    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        "rag_experiments.cli._engine_from_environment",
+        lambda: tmp_path / "not-an-engine",
+    )
     assert main(["--version"]) == EXIT_VERIFIED
     out = capsys.readouterr().out
     assert "engine: not found" in out
@@ -55,7 +95,12 @@ def test_inspect_reports_what_a_copy_would_carry(
     assert main(["inspect", "--project", str(project)]) == EXIT_VERIFIED
     out = capsys.readouterr().out
     assert FIRST_GENERATION in out
-    assert "project lock" in out
+    # What is watched, what is not, and where the copy's state lives: the three
+    # facts a reader needs before pointing a run at a project that is being served.
+    assert "guarded: every path in the project" in out
+    assert "project.lock" in out
+    assert "serving app rewrites on its own" in out
+    assert "disqualifies it" in out
     assert "never written" in out
     assert "account's project registry" in out
 
@@ -355,19 +400,89 @@ def test_compare_of_a_directory_with_no_record_is_a_condition(
 def test_a_run_record_whose_verdict_is_not_verified_exits_with_its_own_status(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    run = tmp_path / "run"
-    run.mkdir()
-    (run / RECORD_NAME).write_text(
+    run = _record_run(
+        tmp_path / "run",
+        verdict="source_project_changed",
+        guard={"unchanged": False, "differences": [], "before": {}},
+    )
+    assert main(["compare", "--run", str(run)]) == EXIT_SOURCE_CHANGED
+    assert "NOT A MEASUREMENT" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("verdict", "expected"),
+    [
+        (VERDICT_VERIFIED, EXIT_VERIFIED),
+        ("source_project_changed", EXIT_SOURCE_CHANGED),
+        (VERDICT_ENGINE_CHANGED, EXIT_ENGINE_CHANGED),
+        (VERDICT_INCOMPLETE, EXIT_INCOMPLETE),
+        ("interrupted", EXIT_INCOMPLETE),
+        ("failed", 1),
+        ("no_arm_measured", 1),
+    ],
+)
+def test_every_verdict_has_its_own_status(
+    tmp_path: Path, verdict: str, expected: int
+) -> None:
+    # A caller scripts against these codes, so each condition is distinguishable
+    # from a refusal and from a completed measurement.
+    run = _record_run(tmp_path / verdict, verdict=verdict)
+    assert main(["compare", "--run", str(run), "--json"]) == expected
+
+
+def test_a_run_whose_verdict_is_unknown_is_refused_rather_than_treated_as_verified(
+    tmp_path: Path,
+) -> None:
+    run = _record_run(tmp_path / "run", verdict="something_new")
+    assert main(["compare", "--run", str(run), "--json"]) == 1
+
+
+def test_a_dry_run_and_the_real_run_after_it_both_work(
+    make_spec,
+    project: Path,
+    workspace: Path,
+    app_source: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Each run takes a directory of its own, so preparing and then measuring the
+    # same specification is two runs rather than one run over its own evidence.
+    spec_path = make_spec([{"name": "baseline", "kind": "settings", "overlay": {}}])
+    arguments = [
+        "run",
+        "--spec",
+        str(spec_path),
+        "--app-source",
+        str(app_source),
+        "--workspace",
+        str(workspace),
+        "--runs",
+        str(tmp_path / "runs"),
+    ]
+    assert main([*arguments, "--dry-run"]) == EXIT_VERIFIED
+    out = capsys.readouterr().out
+    prepared = next((tmp_path / "runs").glob("fixture-dry-run-*"), None)
+    assert prepared is not None, out
+    # The dry run wrote the log of every arm it prepared, and no record.
+    assert (prepared / "baseline" / "arm.log").is_file()
+    assert not list((tmp_path / "runs").rglob(RECORD_NAME))
+
+
+def _record_run(
+    directory: Path, *, verdict: str, guard: dict[str, object] | None = None
+) -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / RECORD_NAME).write_text(
         json.dumps(
             {
-                "verdict": "source_project_changed",
+                "verdict": verdict,
                 "source_project": {
-                    "guard": {"unchanged": False, "differences": [], "before": {}}
+                    "guard": guard
+                    or {"unchanged": True, "differences": [], "before": {}}
                 },
                 "arms": [],
             }
         ),
         encoding="utf-8",
     )
-    assert main(["compare", "--run", str(run)]) == EXIT_SOURCE_CHANGED
-    assert "NOT A MEASUREMENT" in capsys.readouterr().out
+    return directory

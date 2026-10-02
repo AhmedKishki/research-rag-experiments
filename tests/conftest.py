@@ -14,11 +14,19 @@ original to be a real PDF, because nothing below reads one.
 from __future__ import annotations
 
 import json
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import pytest
+
+#: These tests import the installed app, which is a developer's working checkout.
+#: Without this, an import writes a `__pycache__` beside the app's source, and a
+#: test suite that leaves files in the tree it measures would be doing the thing
+#: every other test here holds it does not do. A run's own child processes are given
+#: `PYTHONDONTWRITEBYTECODE` for the same reason.
+sys.dont_write_bytecode = True
 
 #: The generation ids used by the fixture. They carry the shape the app's own
 #: generation naming writes, because a name that does not is refused by the app.
@@ -28,6 +36,60 @@ SECOND_GENERATION = "20260101T010000Z-0000000b"
 #: The project's identifier. A faithful copy keeps it, which is what makes every
 #: `source_id` in the review files still resolve.
 PROJECT_ID = "11111111-2222-3333-4444-555555555555"
+
+#: The query classes a judged set uses, as the app's judged-set schema names them.
+#: The list is stated here rather than read because a fixture states what its files
+#: hold; a judged set that used any other class would be refused by the app's own
+#: harness before a run reached it.
+QUERY_CLASSES = ("quote", "paraphrase", "entity")
+
+#: How many queries the fixture judged sets carry. One is the smallest set a report
+#: can be measured from, and the report contract checks per-query rows, so a fixture
+#: with no query would pass by measuring nothing.
+JUDGED_QUERY_COUNT = 2
+
+
+def build_judged_set(
+    path: Path, *, queries: int = JUDGED_QUERY_COUNT
+) -> dict[str, Any]:
+    """Write a judged set with real identities, and return what it holds.
+
+    A judged set is not a list of strings: each query names its own id, the target it
+    is judged against, and the class it belongs to, and the harness refuses a file
+    missing any of those. A fixture whose queries are empty therefore tests the
+    harness's refusal rather than a measurement, so this writes queries with ids and
+    lets a report name them back.
+    """
+
+    document = {
+        "schema_version": 1,
+        "protocol": "Fixture judged set: one target per query, one class each.",
+        "targets": [
+            {
+                "target_id": f"t{index:02d}",
+                "document_id": f"d{index:02d}",
+                # The chunk the target resolved to when it was judged. The app's
+                # harness re-resolves it from the snippet, and a target without it is
+                # not the shape of a judged set that can be measured.
+                "chunk_id_at_measurement": f"c{index:02d}",
+                "source_path": f"sources/a-book-{index}.pdf",
+                "snippet": f"the passage for t{index:02d}",
+                "chunk_text": f"the passage for t{index:02d}",
+            }
+            for index in range(1, queries + 1)
+        ],
+        "queries": [
+            {
+                "query_id": f"q{index:02d}",
+                "target_id": f"t{index:02d}",
+                "class": QUERY_CLASSES[(index - 1) % len(QUERY_CLASSES)],
+                "query": f"find the passage for t{index:02d}",
+            }
+            for index in range(1, queries + 1)
+        ],
+    }
+    _write_json(path, document)
+    return document
 
 
 def _write_json(path: Path, document: dict[str, Any]) -> None:
@@ -179,7 +241,7 @@ def make_spec(tmp_path: Path, project: Path) -> Callable[..., Path]:
     def _make(arms: list[dict[str, Any]], **overrides: Any) -> Path:
         judgments = tmp_path / "judged.json"
         if not judgments.is_file():
-            _write_json(judgments, {"schema_version": 1, "queries": []})
+            build_judged_set(judgments)
         document: dict[str, Any] = {
             "schema_version": 1,
             "name": "fixture",

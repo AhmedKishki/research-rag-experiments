@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from .checkout import Checkout, make_checkout
-from .execute import ArmResult, run_arm
+from .execute import ArmFailure, ArmResult, PreparedArm, prepare_arm, run_arm
+from .report_schema import ReportFacts, ReportValidationError, validate_report
 from .spec import (
     ARM_KINDS,
     CODE_ARM,
@@ -12,6 +13,7 @@ from .spec import (
     Arm,
     RunSpec,
     load_spec,
+    segment,
 )
 
 __all__ = [
@@ -20,10 +22,17 @@ __all__ = [
     "SETTINGS_ARM",
     "SPEC_SCHEMA_VERSION",
     "Arm",
+    "ArmFailure",
     "ArmResult",
     "Checkout",
+    "PreparedArm",
+    "ReportFacts",
+    "ReportValidationError",
     "RunSpec",
     "load_spec",
     "make_checkout",
+    "prepare_arm",
     "run_arm",
+    "segment",
+    "validate_report",
 ]

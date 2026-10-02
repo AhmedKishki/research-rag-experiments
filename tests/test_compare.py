@@ -8,7 +8,9 @@ from the first arm the specification listed.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -29,11 +31,27 @@ def _report(
     directory: Path, name: str, overall: dict[str, Any], seconds: list[float]
 ) -> Path:
     path = directory / name
+    ordered = sorted(seconds)
+    timing = {
+        name: ordered[math.ceil(q * len(ordered)) - 1] if ordered else None
+        for name, q in (("p50_seconds", 0.5), ("p95_seconds", 0.95))
+    }
     path.write_text(
         json.dumps(
             {
-                "summary": {MODE: {"overall": overall, "per_class": {}}},
-                "runs": [{"mode": MODE, "elapsed_seconds": value} for value in seconds],
+                "schema_version": 3,
+                "summary": {MODE: {"overall": {**overall, **timing}, "per_class": {}}},
+                "runs": [
+                    {
+                        "mode": MODE,
+                        "query_id": f"q{position}",
+                        "elapsed_seconds": value,
+                        "candidate_depth": 40,
+                        "rerank_window": 20,
+                        "reranked": True,
+                    }
+                    for position, value in enumerate(seconds)
+                ],
             }
         ),
         encoding="utf-8",
@@ -94,7 +112,24 @@ def test_every_column_reads_a_key_a_row_carries() -> None:
     # rescued count is read and carried because it is the gate's other half, but
     # only the rejected count is printed: a column of two adjacent counts would
     # put one number in the reach of a mistake.
-    extras = {"present", "kind", "budgets", "mean_dense_admitted_below_floor"}
+    extras = {
+        "present",
+        "kind",
+        "budgets",
+        "mean_dense_admitted_below_floor",
+        "actual_depths",
+        "actual_windows",
+        "rerank_confirmed",
+        "report_schema",
+        "work_by_query",
+        "degraded",
+        "incomplete_text",
+        "pool_counts",
+        "collapse_counts",
+        "stage_diagnostics",
+        "no_answer_support",
+        "latency_protocol",
+    }
     assert set(row) - extras == keys
 
 
@@ -112,7 +147,7 @@ def test_a_measured_arm_reads_every_column(tmp_path: Path) -> None:
     # A report written before the app recorded result-list contents has no such
     # columns, and a zero would read as an absence of duplication rather than of
     # measurement, so they print as dashes.
-    for column in ("spans", "dup", "near", "1src", "rep%"):
+    for column in ("texts", "dup", "lexov", "1src", "xfam%"):
         assert column in table
     assert "     -" in table
 
@@ -227,8 +262,11 @@ def _two_split_record(tmp_path: Path) -> dict[str, Any]:
             "arm": {"name": name, "kind": "settings"},
             "settings": {
                 "values": {
+                    "retrieval.minimum_candidates": 40,
                     "retrieval.maximum_candidates": candidates,
                     "retrieval.rerank_max_candidates": rerank,
+                    "retrieval.rerank_window_multiple": 2,
+                    "retrieval.rerank_window_floor": 10,
                 }
             },
             "reports": {"development": str(development), "held-out": str(held_out)},
@@ -275,9 +313,9 @@ def test_the_splits_are_read_from_each_arms_own_reports(tmp_path: Path) -> None:
 
 def test_each_arms_budget_is_stated_above_the_table(tmp_path: Path) -> None:
     table = render_comparison(_two_split_record(tmp_path))
-    assert "budgets (cand, rrank)" in table
-    assert "baseline: cand=200 rrank=50" in table
-    assert "wider: cand=320 rrank=50" in table
+    assert "budgets (min-cand, cand, rrank, multiple, floor)" in table
+    assert "baseline: min-cand=40 cand=200 rrank=50" in table
+    assert "wider: min-cand=40 cand=320 rrank=50" in table
 
 
 def test_arms_at_unequal_budgets_state_the_confound(tmp_path: Path) -> None:
@@ -285,8 +323,8 @@ def test_arms_at_unequal_budgets_state_the_confound(tmp_path: Path) -> None:
     # is only comparable at a fixed one, so the table states that a difference is
     # also a difference in budget rather than calling the run invalid.
     table = render_comparison(_two_split_record(tmp_path))
-    assert "differs across these arms" in table
-    assert "difference in budget as well as in policy" in table
+    assert "budgets differ or are incomplete" in table
+    assert "policy-only effect cannot be inferred" in table
 
 
 def test_arms_at_equal_budgets_carry_no_warning(tmp_path: Path) -> None:
@@ -294,7 +332,7 @@ def test_arms_at_equal_budgets_carry_no_warning(tmp_path: Path) -> None:
     for arm in record["arms"]:
         arm["settings"]["values"]["retrieval.maximum_candidates"] = 200
     table = render_comparison(record)
-    assert "differs across these arms" not in table
+    assert "budgets differ or are incomplete" not in table
     assert "differences from baseline" in table
 
 
@@ -306,6 +344,7 @@ def test_a_budget_the_record_does_not_state_prints_as_a_dash(
         arm["settings"] = {"values": {}}
     table = render_comparison(record)
     assert "cand=- rrank=-" in table
+    assert "observed:" in table
 
 
 def test_both_latency_quantiles_are_reported(tmp_path: Path) -> None:
@@ -351,16 +390,17 @@ def _redundancy_record(tmp_path: Path) -> dict[str, Any]:
         path.write_text(
             json.dumps(
                 {
+                    "schema_version": 3,
                     "summary": {
                         MODE: {
                             "overall": {
                                 **_row(),
-                                "mean_distinct_evidence_spans": spans,
+                                "mean_distinct_normalized_texts": spans,
                                 "mean_exact_duplicate_slots": exact,
-                                "mean_near_duplicate_slots": 0.0,
+                                "mean_lexical_containment_slots": 0.0,
                                 "mean_same_source_pairs": 2.0,
                             },
-                            "repeated_slot_rate": repeated,
+                            "repeated_slot_rate_cross_target_family": repeated,
                         }
                     },
                     "runs": [{"mode": MODE, "elapsed_seconds": 0.1}],
@@ -381,10 +421,10 @@ def _redundancy_record(tmp_path: Path) -> dict[str, Any]:
 
 def test_the_result_list_columns_read_the_reports_own_values(tmp_path: Path) -> None:
     rows = rows_for_run(_redundancy_record(tmp_path), MODE)
-    assert rows[0]["mean_distinct_evidence_spans"] == 10.0
+    assert rows[0]["mean_distinct_normalized_texts"] == 10.0
     assert rows[0]["mean_exact_duplicate_slots"] == 0.0
     assert rows[0]["mean_same_source_pairs"] == 2.0
-    assert rows[1]["mean_distinct_evidence_spans"] == 8.0
+    assert rows[1]["mean_distinct_normalized_texts"] == 8.0
     assert rows[1]["mean_exact_duplicate_slots"] == 2.0
 
 
@@ -396,8 +436,12 @@ def test_the_repeated_slot_rate_is_read_from_the_modes_own_summary(
     path.write_text(
         json.dumps(
             {
+                "schema_version": 3,
                 "summary": {
-                    MODE: {"overall": _row(), "repeated_slot_rate": 0.11875},
+                    MODE: {
+                        "overall": _row(),
+                        "repeated_slot_rate_cross_target_family": 0.11875,
+                    },
                 },
                 "runs": [],
             }
@@ -405,7 +449,10 @@ def test_the_repeated_slot_rate_is_read_from_the_modes_own_summary(
         encoding="utf-8",
     )
     record["arms"] = [{"arm": {"name": "a", "kind": "settings"}, "report": str(path)}]
-    assert rows_for_run(record, MODE)[0]["repeated_slot_rate"] == 0.11875
+    assert (
+        rows_for_run(record, MODE)[0]["repeated_slot_rate_cross_target_family"]
+        == 0.11875
+    )
     # It is a percentage column, so a reader sees 11.9 rather than 0.119.
     assert "11.9%" in render_comparison(record)
 
@@ -416,7 +463,7 @@ def test_a_change_the_ranking_metrics_cannot_see_still_prints(tmp_path: Path) ->
     # is the one a known-item score is blind to.
     record = _redundancy_record(tmp_path)
     table = render_comparison(record)
-    assert "spans" in table and "dup" in table
+    assert "texts" in table and "dup" in table
     assert "-2.0" in table, "the span loss is a difference from the baseline"
     assert "+2.0" in table, "the duplicate gain is a difference from the baseline"
 
@@ -462,3 +509,215 @@ def test_the_gate_columns_are_read_and_are_separate_from_withheld(
     )
     assert "rej" in table
     assert "13.3" in table
+
+
+def test_observed_depths_are_not_substituted_with_configured_caps(tmp_path):
+    record = _two_split_record(tmp_path)
+    table = render_comparison(record)
+    assert "cand=320" in table
+    assert "wider: depth=[40] rerank_window=[20] rerank_applied=True" in table
+
+
+def test_report_hash_mismatch_refuses_to_display_replaced_evidence(tmp_path):
+    record = _two_split_record(tmp_path)
+    arm = record["arms"][0]
+    path = Path(arm["reports"]["development"])
+    arm["report_hashes"] = {
+        "development": hashlib.sha256(path.read_bytes()).hexdigest()
+    }
+    path.write_text(path.read_text() + "\n", encoding="utf-8")
+    with pytest.raises(ExperimentError, match="integrity check failed"):
+        render_comparison(record)
+
+
+def test_mixing_metric_schemas_cannot_produce_comparable_deltas(tmp_path):
+    record = _two_split_record(tmp_path)
+    path = Path(record["arms"][0]["reports"]["development"])
+    report = json.loads(path.read_text())
+    report["schema_version"] = 2
+    path.write_text(json.dumps(report), encoding="utf-8")
+    with pytest.raises(ExperimentError, match="different metric schemas"):
+        render_comparison(record)
+
+
+def test_legacy_metrics_are_not_relabelled_as_corrected_metrics(tmp_path):
+    record = _redundancy_record(tmp_path)
+    for arm in record["arms"]:
+        path = Path(arm["report"])
+        report = json.loads(path.read_text())
+        report["schema_version"] = 2
+        for payload in report["summary"].values():
+            payload["overall"]["mean_distinct_evidence_spans"] = 10
+            payload["overall"].pop("mean_distinct_normalized_texts", None)
+            payload["overall"]["mean_near_duplicate_slots"] = 3
+            payload["overall"].pop("mean_lexical_containment_slots", None)
+            payload["repeated_slot_rate"] = 0.3
+            payload.pop("repeated_slot_rate_cross_target_family", None)
+        path.write_text(json.dumps(report), encoding="utf-8")
+    row = rows_for_run(record, MODE)[0]
+    assert row["mean_distinct_normalized_texts"] is None
+    assert row["mean_exact_duplicate_slots"] is None
+    assert row["mean_lexical_containment_slots"] is None
+    assert row["repeated_slot_rate_cross_target_family"] is None
+    assert "LEGACY REPORT" in render_comparison(record)
+
+
+@pytest.mark.parametrize("verdict", ["failed", "incomplete", "engine_source_changed"])
+def test_failed_run_never_prints_a_successful_verification(verdict):
+    record = {
+        "verdict": verdict,
+        "source_project": {"guard": {"state": "unknown"}},
+        "arms": [],
+    }
+    out = render_comparison(record)
+    assert "NOT A COMPLETE MEASUREMENT" in out
+    assert "source guard unknown" in out
+    assert "source project unchanged" not in out
+
+
+def test_latency_is_read_from_report_not_recomputed_by_toolkit(tmp_path):
+    record = _record(tmp_path, [("baseline", _row(), [1, 2, 3])])
+    path = Path(record["arms"][0]["report"])
+    report = json.loads(path.read_text())
+    report["summary"][MODE]["overall"]["p95_seconds"] = 42
+    path.write_text(json.dumps(report), encoding="utf-8")
+    assert rows_for_run(record, MODE)[0]["p95_seconds"] == 42
+
+
+def test_rounded_negative_zero_does_not_look_like_a_difference():
+    from rag_experiments.report.compare import _format
+
+    assert _format(-0.0001, "p50 s", delta=True) == "0.00"
+    assert _format(-0.0001, "MRR", delta=True) == "0.000"
+    assert _format(-0.000001, "succ@k", delta=True) == "0.0%"
+
+
+def test_equal_window_ranges_do_not_hide_different_work_per_query(tmp_path):
+    record = _two_split_record(tmp_path)
+    for arm in record["arms"]:
+        arm["settings"]["values"]["retrieval.maximum_candidates"] = 200
+    first = Path(record["arms"][0]["reports"]["development"])
+    second = Path(record["arms"][1]["reports"]["development"])
+    for path, windows in ((first, [10, 20, 10, 20]), (second, [20, 10, 20, 10])):
+        report = json.loads(path.read_text())
+        for run, window in zip(report["runs"], windows, strict=True):
+            run["rerank_window"] = window
+        path.write_text(json.dumps(report), encoding="utf-8")
+    table = render_comparison(record, split="development")
+    assert "rerank_window=[10, 20]" in table
+    assert "budgets differ or are incomplete" in table
+
+
+def test_equal_schema_with_different_metric_definitions_is_refused(tmp_path):
+    record = _two_split_record(tmp_path)
+    path = Path(record["arms"][0]["reports"]["development"])
+    report = json.loads(path.read_text())
+    report["metric_definitions"] = {"exact_duplicate_slots": "unordered word sets"}
+    path.write_text(json.dumps(report), encoding="utf-8")
+    with pytest.raises(ExperimentError, match="different metric definitions"):
+        render_comparison(record)
+
+
+def test_production_measurement_hash_also_authenticates_report(tmp_path):
+    record = _two_split_record(tmp_path)
+    arm = record["arms"][0]
+    path = Path(arm["reports"]["development"])
+    arm["measure"] = [
+        {
+            "split": "development",
+            "report": str(path),
+            "report_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        }
+    ]
+    path.write_text(path.read_text() + "\n", encoding="utf-8")
+    with pytest.raises(ExperimentError, match="integrity check failed"):
+        render_comparison(record)
+
+
+def test_rerank_fallback_never_claims_confirmed_reranking(tmp_path):
+    record = _two_split_record(tmp_path)
+    path = Path(record["arms"][0]["reports"]["development"])
+    report = json.loads(path.read_text())
+    for run in report["runs"]:
+        run["rerank_fallback"] = "model unavailable"
+    report["degraded"] = {"rerank": "model unavailable"}
+    path.write_text(json.dumps(report), encoding="utf-8")
+    assert rows_for_run(record, MODE, "development")[0]["rerank_confirmed"] is False
+    table = render_comparison(record, split="development")
+    assert "DEGRADED" in table
+    assert "differences from baseline" not in table
+
+
+def test_a_missing_baseline_cannot_be_replaced_with_another_arm(tmp_path):
+    record = _two_split_record(tmp_path)
+    record["arms"][0]["reports"] = {}
+    table = render_comparison(record)
+    assert "NO DELTAS: the designated baseline" in table
+
+
+def test_legacy_new_key_spellings_do_not_override_legacy_definitions(tmp_path):
+    record = _redundancy_record(tmp_path)
+    for arm in record["arms"]:
+        path = Path(arm["report"])
+        report = json.loads(path.read_text())
+        report["schema_version"] = 2
+        path.write_text(json.dumps(report), encoding="utf-8")
+    rows = rows_for_run(record, MODE)
+    for row in rows:
+        assert row["mean_distinct_normalized_texts"] is None
+        assert row["mean_lexical_containment_slots"] is None
+        assert row["repeated_slot_rate_cross_target_family"] is None
+
+
+def test_unknown_verdict_and_inconsistent_guard_do_not_claim_success(tmp_path):
+    record = _two_split_record(tmp_path)
+    record["verdict"] = "new-unrecognised-verdict"
+    assert render_comparison(record).startswith("UNKNOWN RUN VERDICT")
+    record["verdict"] = "verified"
+    record["source_project"]["guard"]["unchanged"] = False
+    assert render_comparison(record).startswith("NOT A VERIFIED MEASUREMENT")
+
+
+def test_missing_latency_summary_does_not_trigger_toolkit_recalculation(tmp_path):
+    record = _record(tmp_path, [("baseline", _row(), [1, 2, 3])])
+    path = Path(record["arms"][0]["report"])
+    report = json.loads(path.read_text())
+    for key in ("p50_seconds", "p95_seconds"):
+        report["summary"][MODE]["overall"].pop(key)
+    path.write_text(json.dumps(report), encoding="utf-8")
+    row = rows_for_run(record, MODE)[0]
+    assert row["p50_seconds"] is None
+    assert row["p95_seconds"] is None
+
+
+def test_invalid_schema_is_a_named_refusal(tmp_path):
+    record = _record(tmp_path, [("baseline", _row(), [1])])
+    path = Path(record["arms"][0]["report"])
+    report = json.loads(path.read_text())
+    report["schema_version"] = "3"
+    path.write_text(json.dumps(report), encoding="utf-8")
+    with pytest.raises(ExperimentError, match="Unsupported report schema"):
+        render_comparison(record)
+
+
+def test_stage_denominators_and_unjudged_no_answer_scope_are_visible(tmp_path):
+    record = _record(tmp_path, [("baseline", _row(), [1])])
+    path = Path(record["arms"][0]["report"])
+    report = json.loads(path.read_text())
+    report["no_answer_support"] = "unjudged"
+    report["summary"][MODE]["overall"].update(
+        {
+            "mean_target_present_fused_pre_rerank": None,
+            "target_stage_evaluated_queries_fused_pre_rerank": 0,
+            "mean_target_present_final": 0.7,
+            "target_stage_evaluated_queries_final": 30,
+        }
+    )
+    report["runs"][0]["collapsed_count"] = 4
+    report["runs"][0]["candidate_count"] = 36
+    path.write_text(json.dumps(report), encoding="utf-8")
+    table = render_comparison(record)
+    assert "fused_pre_rerank=- (0/30)" in table
+    assert "final=0.700 (30/30)" in table
+    assert 'no-answer scope: baseline: "unjudged"' in table
+    assert "post_collapse_pool=[36] collapsed=[4]" in table

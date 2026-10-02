@@ -1,7 +1,7 @@
 # `rag_experiments`
 
-What the package owns: the machinery that runs a research-rag retrieval
-experiment outside the project it measures, and the record that says what ran.
+What the package owns: the machinery that runs a research-rag retrieval experiment
+outside the project it measures, and the record that says what ran.
 
 What it may never do:
 
@@ -12,10 +12,16 @@ What it may never do:
 - Declare a setting, a state file name, or a policy version of the app. Each
   fact is read from the app's own code through `engine/`, which is the only
   folder that imports `research_rag`.
+- Claim more isolation than it has. This is a cooperative isolation, not an
+  operating-system sandbox: every process this package spawns is given a sandbox,
+  a pinned settings file, an environment naming the tree under test, and paths
+  pointing inside the copy, but the code a run measures — including a code arm's
+  patch — runs with the reader's own privileges and could reach the original if it
+  tried. What is proved is that *this package* never wrote to the source.
 
 | Folder | Owns |
 |---|---|
-| `engine/` | the app tree under test, and the settings it resolves |
+| `engine/` | the app tree under test, what its harness declares, and the settings it resolves |
 | `sandbox/` | a disposable copy of a project, and the guard over the original |
 | `experiment/` | a run specification, its arms, and how one arm is executed |
 | `report/` | the record a run leaves and the table that compares its arms |

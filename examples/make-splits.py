@@ -1,154 +1,183 @@
 #!/usr/bin/env python3
-"""Split a judged query set into development and held-out halves by target.
+"""Create two exploratory query partitions without splitting target families.
 
-The split is by target, never by query. Every quote, paraphrase, and entity query
-about one passage stays on one side, so a family cannot appear in development and
-be answered from memory in held-out. Splitting the queries instead would put a
-quote in one half and its own paraphrase in the other, which is the leak the split
-exists to prevent.
-
-A target whose source the corpus no longer holds is dropped from both halves and
-named in the output, because a half containing an unresolvable target cannot be
-measured. Dropping it silently would make a smaller judged set look like the same
-one.
-
-The split is alternating over the sorted usable targets, so it is reproducible
-without a random seed and does not depend on the order the queries happen to be
-written in.
-
-    python examples/make-splits.py --judged PATH --out judgments/
-
-It writes two files and prints what each half holds. It does not modify the input.
+No target is excluded by default. Exclusions require an ID and a reason.
+Each partition declares only the targets its own queries use. The generated
+manifest records the input digest, family allocation, and exclusion reasons.
+Partitioning an already inspected benchmark does not create an untouched test set.
 """
 
 from __future__ import annotations
 
 import argparse
 import collections
+import copy
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
 
-#: The names the two halves are written under. They are what a run specification
-#: refers to, so they are stated here once and printed in the output.
-DEVELOPMENT = "development"
-HELD_OUT = "held-out"
-
-#: The classes a judged query may carry, taken from the app's own harness rather
-#: than guessed, so a new class in the input is reported rather than silently
-#: treated as a family that can be split anywhere.
-CLASSES = ("quote", "paraphrase", "entity")
+PARTITIONS = ("exploratory-a", "exploratory-b")
 
 
-def split(judged: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any], list[str]]:
-    """Return the two halves and the targets dropped from both."""
+def split(
+    judged: dict[str, Any], exclusions: dict[str, str] | None = None
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, str]]:
+    """Keep each target and each declared question family in one partition."""
 
-    targets = {str(target["target_id"]): target for target in judged["targets"]}
-    families: dict[str, list[dict[str, Any]]] = collections.defaultdict(list)
-    for query in judged["queries"]:
-        families[str(query["target_id"])].append(query)
-
-    unknown = sorted(set(families) - set(targets))
+    exclusions = dict(exclusions or {})
+    targets = {str(t["target_id"]): t for t in judged["targets"]}
+    if len(targets) != len(judged["targets"]):
+        raise ValueError("Target IDs must be unique")
+    queries = judged["queries"]
+    if len({str(q["query_id"]) for q in queries}) != len(queries):
+        raise ValueError("Query IDs must be unique")
+    used = {str(q["target_id"]) for q in queries}
+    unknown = (used | set(exclusions)) - set(targets)
     if unknown:
-        raise SystemExit(f"The judged set names targets it does not define: {unknown}")
+        raise ValueError(f"Unknown target IDs: {sorted(unknown)}")
+    if any(not reason.strip() for reason in exclusions.values()):
+        raise ValueError("Each exclusion requires a nonempty reason")
 
-    usable = sorted(target for target in families if _resolves(targets[target]))
-    dropped = sorted(target for target in families if not _resolves(targets[target]))
+    usable = sorted(used - set(exclusions))
+    parents = {target: target for target in usable}
 
-    halves: dict[str, list[dict[str, Any]]] = {DEVELOPMENT: [], HELD_OUT: []}
-    for position, target in enumerate(usable):
-        name = DEVELOPMENT if position % 2 == 0 else HELD_OUT
-        halves[name].extend(families[target])
+    def root(target: str) -> str:
+        while parents[target] != target:
+            target = parents[target]
+        return target
 
-    written: list[dict[str, Any]] = []
-    for name in (DEVELOPMENT, HELD_OUT):
-        queries = sorted(halves[name], key=lambda item: str(item["query_id"]))
+    # Question families may span several targets. Merge those targets before
+    # allocation rather than assuming a target ID is always a whole family.
+    family_owner: dict[str, str] = {}
+    for query in queries:
+        target = str(query["target_id"])
+        if target not in parents:
+            continue
+        declared = {
+            str(value)
+            for value in (query.get("family_id"), targets[target].get("family_id"))
+            if value
+        }
+        for family in sorted(declared):
+            # Only explicit labels enter this map. A family named "t3" does not
+            # implicitly connect an unrelated target whose ID happens to be t3.
+            if family in family_owner:
+                first, second = root(family_owner[family]), root(target)
+                parents[max(first, second)] = min(first, second)
+            else:
+                family_owner[family] = target
+    groups: dict[str, set[str]] = collections.defaultdict(set)
+    for target in usable:
+        groups[root(target)].add(target)
+    if len(groups) < 2:
+        raise ValueError("At least two independent target families are required")
+
+    allocations = {name: set() for name in PARTITIONS}
+    for position, group in enumerate(sorted(groups)):
+        allocations[PARTITIONS[position % 2]].update(groups[group])
+    outputs = []
+    for name in PARTITIONS:
+        selected = allocations[name]
         document = dict(judged)
-        document["targets"] = [
-            target for target in judged["targets"] if str(target["target_id"]) in usable
-        ]
-        document["queries"] = queries
+        document["targets"] = [targets[key] for key in sorted(selected)]
+        document["queries"] = sorted(
+            (q for q in queries if str(q["target_id"]) in selected),
+            key=lambda q: str(q["query_id"]),
+        )
         document["protocol"] = (
-            f"{judged.get('protocol', '')} Split {name!r}: "
-            f"{len(queries)} queries over "
-            f"{len({q['target_id'] for q in queries})} targets, chosen by target so a "
-            f"query family stays on one side. Excluded targets: "
-            f"{sorted(EXCLUDED_TARGETS & set(families)) or 'none'}. Generated by "
-            f"examples/make-splits.py; the source set is unchanged."
+            f"{judged.get('protocol', '')} Exploratory partition {name}; "
+            "target and declared question families are disjoint. "
+            "This partition is not a previously unseen holdout."
         ).strip()
-        written.append({"name": name, "document": document})
-    return written[0], written[1], dropped
+        document["partition_metadata"] = {
+            "role": "exploratory",
+            "method": "sorted-family-alternation",
+            "excluded_targets": exclusions,
+            "unqueried_targets": sorted(set(targets) - used),
+            "unqueried_reason": "No query references these input targets",
+            "declared_family_links": bool(family_owner),
+            "target_groups": {
+                group: sorted(members)
+                for group, members in groups.items()
+                if members <= selected
+            },
+        }
+        outputs.append({"name": name, "document": copy.deepcopy(document)})
+    return outputs[0], outputs[1], exclusions
 
 
-def _resolves(target: dict[str, Any]) -> bool:
-    """Whether a target names a source the corpus can still be asked about.
+def exclusion_map(entries: list[str]) -> dict[str, str]:
+    """Parse explicit ID=reason exclusions; refuse duplicates and empty reasons."""
 
-    A target naming a source the generation no longer holds cannot resolve, so it
-    is dropped rather than carried into a half that can never be measured. The
-    judged set does not record that, so it is stated as a manual exclusion the
-    caller passes in.
-    """
-
-    return str(target.get("target_id")) not in EXCLUDED_TARGETS
-
-
-#: Targets whose source the corpus no longer holds. This is a benchmark decision,
-#: not a measurement, so it is named here and printed rather than discovered by a
-#: run that then fails. The app's harness refuses the same target on
-#: `--skip-targets`; the two lists have to agree.
-EXCLUDED_TARGETS = frozenset({"t12"})
+    exclusions = {}
+    for entry in entries:
+        target, separator, reason = entry.partition("=")
+        if not separator or not target.strip() or not reason.strip():
+            raise ValueError("--exclude-target requires TARGET_ID=reason")
+        if target.strip() in exclusions:
+            raise ValueError(f"Duplicate exclusion: {target.strip()}")
+        exclusions[target.strip()] = reason.strip()
+    return exclusions
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--judged",
-        type=Path,
-        required=True,
-        help="The judged query set to split. It is not modified.",
-    )
-    parser.add_argument(
-        "--out",
-        type=Path,
-        default=Path("judgments"),
-        help="Directory the two halves are written to.",
-    )
-    args = parser.parse_args()
+    parser.add_argument("--judged", type=Path, required=True)
+    parser.add_argument("--out", type=Path, default=Path("judgments"))
+    parser.add_argument("--exclude-target", action="append", default=[])
+    args = parser.parse_args(argv)
+    try:
+        source = args.judged.read_bytes()
+        first, second, exclusions = split(
+            json.loads(source), exclusion_map(args.exclude_target)
+        )
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        parser.error(str(exc))
 
-    judged = json.loads(args.judged.read_text(encoding="utf-8"))
-    development, held_out, dropped = split(judged)
-
+    destinations = [args.out / f"{name}-queries.json" for name in PARTITIONS]
+    manifest_path = args.out / "partition-manifest.json"
+    if any(path.exists() for path in [*destinations, manifest_path]):
+        parser.error("Output already exists; use a new partition directory")
     args.out.mkdir(parents=True, exist_ok=True)
-    written: list[Path] = []
-    for half in (development, held_out):
-        path = args.out / f"{half['name']}-queries.json"
+    manifest = {
+        "schema_version": 1,
+        "role": "exploratory",
+        "input_sha256": hashlib.sha256(source).hexdigest(),
+        "excluded_targets": exclusions,
+        "unqueried_targets": first["document"]["partition_metadata"][
+            "unqueried_targets"
+        ],
+        "partitions": [],
+    }
+    for partition, path in zip((first, second), destinations, strict=True):
+        document = partition["document"]
         path.write_text(
-            json.dumps(half["document"], indent=2, ensure_ascii=False) + "\n",
+            json.dumps(document, indent=2, ensure_ascii=False) + "\n",
             encoding="utf-8",
         )
-        written.append(path)
-
-    total = len(judged["queries"])
-    print(f"source: {args.judged}  {len(judged['targets'])} targets, {total} queries")
-    for half, path in zip((development, held_out), written, strict=True):
-        targets = sorted({q["target_id"] for q in half["document"]["queries"]})
-        counts = collections.Counter(
-            str(q["class"]) for q in half["document"]["queries"]
-        )
-        unknown = sorted(set(counts) - set(CLASSES))
+        counts = collections.Counter(q["class"] for q in document["queries"])
+        info = {
+            "name": partition["name"],
+            "file": path.name,
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "target_ids": [t["target_id"] for t in document["targets"]],
+            "query_count": len(document["queries"]),
+            "classes": dict(counts),
+            "target_groups": document["partition_metadata"]["target_groups"],
+            "declared_family_links": document["partition_metadata"][
+                "declared_family_links"
+            ],
+        }
+        manifest["partitions"].append(info)
         print(
-            f"  {half['name']:<13} {len(half['document']['queries']):>3} queries over "
-            f"{len(targets):>2} targets  {dict(counts)}"
-            + (f"  UNKNOWN CLASSES {unknown}" if unknown else "")
+            f"{partition['name']}: {info['query_count']} queries, "
+            f"{len(info['target_ids'])} targets; {path}"
         )
-        print(f"                {path}")
-    print(f"  dropped from both halves: {dropped or 'none'}")
-    overlap = {q["target_id"] for q in development["document"]["queries"]} & {
-        q["target_id"] for q in held_out["document"]["queries"]
-    }
-    print(
-        f"  targets in both halves:    {sorted(overlap) or 'none (families cannot leak)'}"
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
+    print(f"Exclusions: {exclusions}; manifest: {manifest_path}")
     return 0
 
 

@@ -1,56 +1,62 @@
 {
   "schema_version": 1,
-  "name": "candidate-window-ablation",
-  "source_project": "/home/ahmed/Documents/projects/ai-and-fetishism",
+  "name": "candidate-and-rerank-budget-grid",
+  "source_project": "../../evaluation-project",
   "judgments": [
-    {
-      "name": "development",
-      "path": "/tmp/kilo/splits/development-queries.json"
-    },
-    {
-      "name": "held-out",
-      "path": "/tmp/kilo/splits/held-out-queries.json"
-    }
+    {"name": "exploratory-a", "path": "../judgments/partitions/exploratory-a-queries.json"},
+    {"name": "exploratory-b", "path": "../judgments/partitions/exploratory-b-queries.json"}
   ],
-  "generations": [],
   "harness": {
     "top_k": 10,
     "deep_top_k": 0,
-    "modes": [
-      "hybrid+rerank"
-    ],
-    "offline": true,
-    "skip_targets": [
-      "t12"
-    ]
+    "modes": ["hybrid+rerank"],
+    "offline": true
   },
   "arms": [
-    {
-      "name": "depth-40-rrank-20",
-      "kind": "settings",
-      "overlay": {
-        "retrieval.minimum_candidates": 20,
-        "retrieval.maximum_candidates": 40,
-        "retrieval.rerank_max_candidates": 20
-      }
-    },
-    {
-      "name": "depth-80-rrank-20",
-      "kind": "settings",
-      "overlay": {
-        "retrieval.minimum_candidates": 40,
-        "retrieval.maximum_candidates": 80,
-        "retrieval.rerank_max_candidates": 20
-      }
-    },
-    {
-      "name": "depth-160-rrank-20",
-      "kind": "settings",
-      "overlay": {
-        "retrieval.minimum_candidates": 80,
-        "retrieval.maximum_candidates": 160,
-        "retrieval.rerank_max_candidates": 20
-      }
-    }
+    {"name": "depth-40-rerank-20", "kind": "settings", "overlay": {
+      "retrieval.minimum_candidates": 40, "retrieval.maximum_candidates": 40,
+      "retrieval.rerank_window_multiple": 5, "retrieval.rerank_window_floor": 50,
+      "retrieval.rerank_max_candidates": 20
+    }},
+    {"name": "depth-40-rerank-30", "kind": "settings", "overlay": {
+      "retrieval.minimum_candidates": 40, "retrieval.maximum_candidates": 40,
+      "retrieval.rerank_window_multiple": 5, "retrieval.rerank_window_floor": 50,
+      "retrieval.rerank_max_candidates": 30
+    }},
+    {"name": "depth-40-rerank-50", "kind": "settings", "overlay": {
+      "retrieval.minimum_candidates": 40, "retrieval.maximum_candidates": 40,
+      "retrieval.rerank_window_multiple": 5, "retrieval.rerank_window_floor": 50,
+      "retrieval.rerank_max_candidates": 50
+    }},
+    {"name": "depth-80-rerank-20", "kind": "settings", "overlay": {
+      "retrieval.minimum_candidates": 80, "retrieval.maximum_candidates": 80,
+      "retrieval.rerank_window_multiple": 5, "retrieval.rerank_window_floor": 50,
+      "retrieval.rerank_max_candidates": 20
+    }},
+    {"name": "depth-80-rerank-30", "kind": "settings", "overlay": {
+      "retrieval.minimum_candidates": 80, "retrieval.maximum_candidates": 80,
+      "retrieval.rerank_window_multiple": 5, "retrieval.rerank_window_floor": 50,
+      "retrieval.rerank_max_candidates": 30
+    }},
+    {"name": "depth-80-rerank-50", "kind": "settings", "overlay": {
+      "retrieval.minimum_candidates": 80, "retrieval.maximum_candidates": 80,
+      "retrieval.rerank_window_multiple": 5, "retrieval.rerank_window_floor": 50,
+      "retrieval.rerank_max_candidates": 50
+    }},
+    {"name": "depth-160-rerank-20", "kind": "settings", "overlay": {
+      "retrieval.minimum_candidates": 160, "retrieval.maximum_candidates": 160,
+      "retrieval.rerank_window_multiple": 5, "retrieval.rerank_window_floor": 50,
+      "retrieval.rerank_max_candidates": 20
+    }},
+    {"name": "depth-160-rerank-30", "kind": "settings", "overlay": {
+      "retrieval.minimum_candidates": 160, "retrieval.maximum_candidates": 160,
+      "retrieval.rerank_window_multiple": 5, "retrieval.rerank_window_floor": 50,
+      "retrieval.rerank_max_candidates": 30
+    }},
+    {"name": "depth-160-rerank-50", "kind": "settings", "overlay": {
+      "retrieval.minimum_candidates": 160, "retrieval.maximum_candidates": 160,
+      "retrieval.rerank_window_multiple": 5, "retrieval.rerank_window_floor": 50,
+      "retrieval.rerank_max_candidates": 50
+    }}
   ]
 }

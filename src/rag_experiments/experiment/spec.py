@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeAlias
 
 from ..errors import ExperimentError
 
@@ -73,6 +73,10 @@ ARM_FIELDS = frozenset({"name", "kind", "overlay", "base", "patch", "prepare"})
 #: harness does not know is left in place rather than guessed at, so a command
 #: that expected a substitution the harness cannot make fails loudly inside the
 #: command instead of quietly measuring the wrong path.
+#:
+#: Each element of a `prepare` list is one command: a string, which is split the
+#: way a shell would split it, or a list of arguments, which is used exactly as
+#: written so that a path with a space in it stays one argument.
 PREPARE_TOKENS = ("{project}", "{source}", "{tree}", "{sandbox}")
 
 #: The split name a specification that names one judged path is given. It is named
@@ -81,6 +85,34 @@ SINGLE_SPLIT = "all"
 
 #: The keys one split of the `judgments` list may carry.
 JUDGMENT_FIELDS = frozenset({"name", "path"})
+
+#: One prepare command: a shell command line, or its arguments already split.
+PrepareCommand: TypeAlias = "str | list[str]"
+
+
+def segment(name: str, *, strict: bool = True) -> str:
+    """One plain path segment for a name a record keys on.
+
+    An arm's name, a split's name, and the specification's own name all become
+    directory names inside a run, so a name that reaches a parent, a root, or
+    another directory is a traversal rather than a label. With `strict`, such a
+    name is refused, because silently renaming it would put the record under a key
+    the reader did not write. Without it, the name is reduced to one safe segment,
+    which is what a caller that invented the name itself needs.
+    """
+
+    safe = "".join(
+        character if character.isalnum() or character in "-_" else "-"
+        for character in name
+    ).strip("-")
+    safe = safe or "split"
+    if strict and safe != name:
+        raise ExperimentError(
+            f"{name!r} is not one plain path segment, and this harness uses it as a "
+            "directory name inside a run. Use letters, digits, hyphens, and "
+            "underscores."
+        )
+    return safe
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,7 +124,7 @@ class Arm:
     overlay: dict[str, Any]
     base: str | None
     patch: Path | None
-    prepare: tuple[str, ...]
+    prepare: tuple[PrepareCommand, ...]
 
     def describe(self) -> dict[str, Any]:
         return {
@@ -101,7 +133,7 @@ class Arm:
             "overlay": self.overlay,
             "base": self.base,
             "patch": None if self.patch is None else str(self.patch),
-            "prepare": list(self.prepare),
+            "prepare": [list(item) for item in self.prepare],
         }
 
 
@@ -171,6 +203,10 @@ def load_spec(path: Path) -> RunSpec:
             f"{location} declares schema_version {version!r}; this harness reads "
             f"{SPEC_SCHEMA_VERSION}."
         )
+    # The name becomes a directory inside the run's own directory, so it is checked
+    # before anything is read from disk and before a judged set is resolved against
+    # it: a name that reaches outside the run is refused before it is used.
+    name = segment(str(document.get("name") or location.stem).strip())
 
     base = location.parent
     source_project = _path(document, "source_project", base, location)
@@ -188,7 +224,7 @@ def load_spec(path: Path) -> RunSpec:
 
     return RunSpec(
         path=location,
-        name=str(document.get("name") or location.stem),
+        name=name,
         source_project=source_project,
         judgments=judgments,
         generations=tuple(str(item) for item in document.get("generations") or ()),
@@ -225,9 +261,7 @@ def _judged_sets(entry: Any, base: Path, location: Path) -> tuple[JudgedSet, ...
     judged: list[JudgedSet] = []
     for position, item in enumerate(entry, 1):
         _refuse_unknown(item, JUDGMENT_FIELDS, f"{location} judged set {position}")
-        name = str(item.get("name") or "").strip()
-        if not name:
-            raise ExperimentError(f"{location} judged set {position} has no name")
+        name = segment(str(item.get("name") or "").strip())
         raw = item.get("path")
         if not isinstance(raw, str) or not raw.strip():
             raise ExperimentError(f"{location} judged set {name!r} has no path")
@@ -247,9 +281,7 @@ def _arm(entry: Any, base: Path, location: Path, position: int) -> Arm:
     if not isinstance(entry, dict):
         raise ExperimentError(f"{location} arm {position} is not an object")
     _refuse_unknown(entry, ARM_FIELDS, f"{location} arm {position}")
-    name = str(entry.get("name") or "").strip()
-    if not name:
-        raise ExperimentError(f"{location} arm {position} has no name")
+    name = segment(str(entry.get("name") or "").strip())
     kind = str(entry.get("kind") or "").strip()
     if kind not in ARM_KINDS:
         raise ExperimentError(
@@ -281,13 +313,7 @@ def _arm(entry: Any, base: Path, location: Path, position: int) -> Arm:
         if not patch_path.is_file():
             raise ExperimentError(f"{location} arm {name!r} has no patch: {patch_path}")
 
-    prepare = entry.get("prepare") or []
-    if not isinstance(prepare, list) or any(
-        not isinstance(item, str) for item in prepare
-    ):
-        raise ExperimentError(
-            f"{location} arm {name!r} has a non-string `prepare` command"
-        )
+    prepare = _prepare(entry.get("prepare") or [], location, name)
 
     return Arm(
         name=name,
@@ -295,8 +321,40 @@ def _arm(entry: Any, base: Path, location: Path, position: int) -> Arm:
         overlay={str(key): value for key, value in overlay.items()},
         base=None if base_revision is None else str(base_revision),
         patch=patch_path,
-        prepare=tuple(str(item) for item in prepare),
+        prepare=prepare,
     )
+
+
+def _prepare(entry: Any, location: Path, arm: str) -> tuple[PrepareCommand, ...]:
+    """Read the commands an arm runs before it is measured.
+
+    A command is one shell command line, which is split the way a shell would, or a
+    list of arguments, which is used as written. Both forms are read because both
+    are natural: a one-line command is a string, and a command whose arguments carry
+    spaces or quotes is a list.
+    """
+
+    if not isinstance(entry, list):
+        raise ExperimentError(
+            f"{location} arm {arm!r} has a `prepare` that is not a list of commands"
+        )
+    commands: list[PrepareCommand] = []
+    for position, item in enumerate(entry, 1):
+        if isinstance(item, str) and item.strip():
+            commands.append(item)
+            continue
+        if (
+            isinstance(item, list)
+            and item
+            and all(isinstance(part, str) and part for part in item)
+        ):
+            commands.append([str(part) for part in item])
+            continue
+        raise ExperimentError(
+            f"{location} arm {arm!r} prepare command {position} is neither a "
+            "non-empty command line nor a non-empty list of arguments"
+        )
+    return tuple(commands)
 
 
 def _harness(entry: Any, location: Path) -> dict[str, Any]:
@@ -343,4 +401,5 @@ __all__ = [
     "JudgedSet",
     "RunSpec",
     "load_spec",
+    "segment",
 ]

@@ -94,7 +94,7 @@ def test_two_splits_of_one_name_are_refused(make_spec) -> None:
 def test_a_split_with_no_name_is_refused(make_spec) -> None:
     with pytest.raises(ExperimentError) as caught:
         load_spec(make_spec([SETTINGS], judgments=[{"path": "judged.json"}]))
-    assert "has no name" in str(caught.value)
+    assert "path segment" in str(caught.value)
 
 
 def test_a_split_with_an_unknown_key_is_refused(make_spec) -> None:
@@ -215,7 +215,46 @@ def test_two_arms_of_one_name_are_refused(make_spec) -> None:
 def test_an_arm_with_no_name_is_refused(make_spec) -> None:
     with pytest.raises(ExperimentError) as caught:
         load_spec(make_spec([{"kind": "settings", "overlay": {}}]))
-    assert "has no name" in str(caught.value)
+    assert "path segment" in str(caught.value)
+
+
+@pytest.mark.parametrize("name", ["../elsewhere", "a/b", "..", ".", "a b", "with.dots"])
+def test_a_name_that_is_not_one_path_segment_is_refused(make_spec, name: str) -> None:
+    # An arm's name becomes a directory inside the run's own directory, so a name
+    # that reaches a parent or another directory is a traversal rather than a label.
+    with pytest.raises(ExperimentError) as caught:
+        load_spec(make_spec([{"name": name, "kind": "settings", "overlay": {}}]))
+    assert "path segment" in str(caught.value)
+
+    with pytest.raises(ExperimentError) as caught:
+        load_spec(
+            make_spec(
+                [SETTINGS],
+                judgments=[{"name": name, "path": "judged.json"}],
+            )
+        )
+    assert "path segment" in str(caught.value)
+
+
+def test_a_specification_whose_own_name_is_not_a_segment_is_refused(
+    tmp_path: Path, project: Path
+) -> None:
+    path = tmp_path / "spec.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "name": "../escape",
+                "source_project": str(project),
+                "judgments": "judged.json",
+                "arms": [{"name": "a", "kind": "settings", "overlay": {}}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ExperimentError) as caught:
+        load_spec(path)
+    assert "path segment" in str(caught.value)
 
 
 def test_an_unknown_arm_kind_is_refused(make_spec) -> None:
