@@ -65,7 +65,12 @@ COLUMNS: tuple[tuple[str, str, str], ...] = (
         "repeated_slot_rate",
         "Slots held by a passage more than one query returned.",
     ),
-    ("withheld", "mean_withheld", "Candidates a relevance gate rejected."),
+    ("withheld", "mean_withheld", "Passages withheld from the answer."),
+    (
+        "rej",
+        "mean_dense_rejected_below_floor",
+        "Dense candidates the cosine gate rejected.",
+    ),
     ("p50 s", "p50_seconds", "The median measured query, in seconds."),
     ("p95 s", "p95_seconds", "The slowest measured query, in seconds."),
 )
@@ -103,6 +108,7 @@ WIDTHS: dict[str, int] = {
     "srcs": 5,
     "rep%": 6,
     "withheld": 9,
+    "rej": 6,
     "p50 s": 7,
     "p95 s": 7,
 }
@@ -154,6 +160,16 @@ def _row(arm: dict[str, Any], mode: str, split: str | None) -> dict[str, Any]:
         "document_success_at_k": overall.get("document_success_at_k"),
         "mean_distinct_sources": overall.get("mean_distinct_sources"),
         "mean_withheld": overall.get("mean_withheld"),
+        # The gate's own counts, which withheld_candidates never carries: that
+        # count is about the answer, this one about the gate that ran before
+        # fusion, and a search can report zero of the first while rejecting a
+        # hundred of the second.
+        "mean_dense_rejected_below_floor": overall.get(
+            "mean_dense_rejected_below_floor"
+        ),
+        "mean_dense_admitted_below_floor": overall.get(
+            "mean_dense_admitted_below_floor"
+        ),
         "mean_distinct_evidence_spans": overall.get("mean_distinct_evidence_spans"),
         "mean_exact_duplicate_slots": overall.get("mean_exact_duplicate_slots"),
         "mean_near_duplicate_slots": overall.get("mean_near_duplicate_slots"),

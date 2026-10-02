@@ -26,6 +26,9 @@ The engineering guide for AI agents working in `rag-experiments`.
   - The result-list columns are printed beside the quality ones for the same
     reason: a known-item score is blind to a change in what a result list
     contained, so a redundancy or repetition effect has to be readable without it.
+  - Two counts that sound alike are never one column. The gate's rejections and
+    the answer's withheld passages are different facts, and printing one where the
+    other was meant reports a mechanism as idle while it is working.
   - The comparison does not average, weight, rank, or decide. The first arm the
     specification listed is the baseline, and it is the first arm because a
     baseline chosen after the fact is not a baseline.

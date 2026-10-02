@@ -90,8 +90,12 @@ def test_every_column_reads_a_key_a_row_carries() -> None:
         {"arm": {"name": "a", "kind": "settings"}, "report": ""}, MODE, None
     )
     # A column whose key no row carries is a column that silently prints as a
-    # dash, so the row is built from the column table and the two agree exactly.
-    assert set(row) - {"present", "kind", "budgets"} == keys
+    # dash, so the row carries exactly the printed keys plus named extras. The
+    # rescued count is read and carried because it is the gate's other half, but
+    # only the rejected count is printed: a column of two adjacent counts would
+    # put one number in the reach of a mistake.
+    extras = {"present", "kind", "budgets", "mean_dense_admitted_below_floor"}
+    assert set(row) - extras == keys
 
 
 def test_a_measured_arm_reads_every_column(tmp_path: Path) -> None:
@@ -415,3 +419,46 @@ def test_a_change_the_ranking_metrics_cannot_see_still_prints(tmp_path: Path) ->
     assert "spans" in table and "dup" in table
     assert "-2.0" in table, "the span loss is a difference from the baseline"
     assert "+2.0" in table, "the duplicate gain is a difference from the baseline"
+
+
+def test_the_gate_columns_are_read_and_are_separate_from_withheld(
+    tmp_path: Path,
+) -> None:
+    # withheld_candidates counts what left the answer; the gate counts what it
+    # dropped before fusion. A run where the first is zero and the second is not is
+    # ordinary, and printing only the first would report the gate as inert.
+    path = tmp_path / "gated.json"
+    path.write_text(
+        json.dumps(
+            {
+                "summary": {
+                    MODE: {
+                        "overall": {
+                            **_row(mean_withheld=0.0),
+                            "mean_dense_rejected_below_floor": 13.3,
+                            "mean_dense_admitted_below_floor": 12.9,
+                        },
+                        "repeated_slot_rate": 0.0,
+                    }
+                },
+                "runs": [{"mode": MODE, "elapsed_seconds": 0.1}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    row = rows_for_run(
+        {"arms": [{"arm": {"name": "a", "kind": "settings"}, "report": str(path)}]},
+        MODE,
+    )[0]
+    assert row["mean_withheld"] == 0.0
+    assert row["mean_dense_rejected_below_floor"] == 13.3
+    assert row["mean_dense_admitted_below_floor"] == 12.9
+    table = render_comparison(
+        {
+            "verdict": "verified",
+            "source_project": {"guard": {"unchanged": True, "differences": []}},
+            "arms": [{"arm": {"name": "a", "kind": "settings"}, "report": str(path)}],
+        }
+    )
+    assert "rej" in table
+    assert "13.3" in table

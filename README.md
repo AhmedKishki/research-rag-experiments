@@ -181,6 +181,11 @@ sweep varies the window on purpose, and a policy ablation is only comparable at 
 fixed one. Latency is shown as both p50 and p95, each a value that was measured
 rather than an interpolation.
 
+The `rej` column is the pre-fusion cosine gate's own count of dense candidates it
+rejected. It is not the same number as `withheld`, which is about the answer: a
+search rejecting thirteen candidates per query reports zero withheld, so a table
+carrying only `withheld` reports a gate as inert while it is doing its most work.
+
 The result-list columns `spans`, `dup`, `near`, `1src`, and `rep%` are what a
 result list *contained* rather than how it ranked. A known-item score registers a
 change only when the designated passage crosses the depth, so a policy that
