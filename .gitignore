@@ -1,0 +1,12 @@
+# A workspace holds the disposable projects an experiment measured. They are
+# copies of a corpus and are large, so nothing under one is ever tracked.
+/workspaces/
+# A run directory holds the report each arm produced, the log it wrote, and the
+# record this toolkit assembles from both. Regenerate one instead of editing it.
+/runs/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.venv/
+*.egg-info/

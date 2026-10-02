@@ -1,0 +1,64 @@
+[build-system]
+requires = ["setuptools>=84.0.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rag-experiments"
+version = "0.1.0"
+description = "An experiment toolkit that measures research-rag retrieval in an isolated copy of a project, and never writes inside the project it measures"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    # The engine under test. It is a dependency rather than a copy: this toolkit
+    # measures the app, and a copy of it would be a second app that drifts.
+    "research-rag>=1.0.0",
+]
+
+[project.scripts]
+rag-experiments = "rag_experiments.cli:main"
+
+[project.urls]
+Repository = "https://github.com/AhmedKishki/research-rag-experiments"
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "pytest-timeout>=2.4.0",
+    "ruff>=0.7.3",
+]
+
+[tool.uv]
+package = true
+
+[tool.uv.sources]
+# The engine under test is the working tree beside this repository, installed
+# editable so a measurement names the code a developer is editing rather than a
+# copy of it. Change this to a git URL and a tag to measure a published engine
+# instead, and a code arm copies whatever this points at.
+research-rag = { path = "../ultra-rag-mcp-servers/research-rag", editable = true }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# One test builds a disposable project and copies a generation, and the settings
+# tests resolve the app's real layer stack. A hang here is a lock or a network
+# call, so the cap is short enough to fail loudly.
+timeout = 120
+timeout_method = "thread"
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+
+[tool.ruff.lint]
+extend-select = ["ASYNC", "BLE001", "C901", "RUF100", "SIM"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 25
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["ASYNC109", "ASYNC240"]
