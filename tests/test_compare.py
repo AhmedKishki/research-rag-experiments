@@ -98,13 +98,19 @@ def test_a_measured_arm_reads_every_column(tmp_path: Path) -> None:
     record = _record(tmp_path, [("baseline", _row(), [0.1, 0.2, 0.3, 0.4])])
     table = render_comparison(record)
     assert "baseline" in table
-    assert " 30 " in table
+    assert "  30 " in table
     assert "50.0%" in table
     assert "0.600" in table
     assert "0.65" in table
     assert "7.0" in table
     assert "1.5" in table
     assert "0.40" in table, "the p95 is the slowest measured query"
+    # A report written before the app recorded result-list contents has no such
+    # columns, and a zero would read as an absence of duplication rather than of
+    # measurement, so they print as dashes.
+    for column in ("spans", "dup", "near", "1src", "rep%"):
+        assert column in table
+    assert "     -" in table
 
 
 def test_a_metric_the_report_stopped_carrying_prints_as_a_dash(tmp_path: Path) -> None:
@@ -331,3 +337,81 @@ def test_the_verdict_leads_a_run_with_no_readable_number(tmp_path: Path) -> None
     out = render_comparison(record)
     assert out.startswith("source project unchanged")
     assert "No arm of this run reported" in out
+
+
+def _redundancy_record(tmp_path: Path) -> dict[str, Any]:
+    """A record from a report that carries result-list contents."""
+
+    def arm(name: str, exact: float, spans: float, repeated: float) -> dict[str, Any]:
+        path = tmp_path / f"{name}.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "summary": {
+                        MODE: {
+                            "overall": {
+                                **_row(),
+                                "mean_distinct_evidence_spans": spans,
+                                "mean_exact_duplicate_slots": exact,
+                                "mean_near_duplicate_slots": 0.0,
+                                "mean_same_source_pairs": 2.0,
+                            },
+                            "repeated_slot_rate": repeated,
+                        }
+                    },
+                    "runs": [{"mode": MODE, "elapsed_seconds": 0.1}],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return {"arm": {"name": name, "kind": "settings"}, "report": str(path)}
+
+    return {
+        "verdict": "verified",
+        "source_project": {
+            "guard": {"unchanged": True, "differences": [], "before": {}}
+        },
+        "arms": [arm("baseline", 0.0, 10.0, 0.0), arm("deduplicated", 2.0, 8.0, 0.0)],
+    }
+
+
+def test_the_result_list_columns_read_the_reports_own_values(tmp_path: Path) -> None:
+    rows = rows_for_run(_redundancy_record(tmp_path), MODE)
+    assert rows[0]["mean_distinct_evidence_spans"] == 10.0
+    assert rows[0]["mean_exact_duplicate_slots"] == 0.0
+    assert rows[0]["mean_same_source_pairs"] == 2.0
+    assert rows[1]["mean_distinct_evidence_spans"] == 8.0
+    assert rows[1]["mean_exact_duplicate_slots"] == 2.0
+
+
+def test_the_repeated_slot_rate_is_read_from_the_modes_own_summary(
+    tmp_path: Path,
+) -> None:
+    record = _redundancy_record(tmp_path)
+    path = tmp_path / "repeated.json"
+    path.write_text(
+        json.dumps(
+            {
+                "summary": {
+                    MODE: {"overall": _row(), "repeated_slot_rate": 0.11875},
+                },
+                "runs": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    record["arms"] = [{"arm": {"name": "a", "kind": "settings"}, "report": str(path)}]
+    assert rows_for_run(record, MODE)[0]["repeated_slot_rate"] == 0.11875
+    # It is a percentage column, so a reader sees 11.9 rather than 0.119.
+    assert "11.9%" in render_comparison(record)
+
+
+def test_a_change_the_ranking_metrics_cannot_see_still_prints(tmp_path: Path) -> None:
+    # The second arm loses three spans and gains two duplicates while every
+    # quality column is identical. That difference has to be readable, because it
+    # is the one a known-item score is blind to.
+    record = _redundancy_record(tmp_path)
+    table = render_comparison(record)
+    assert "spans" in table and "dup" in table
+    assert "-2.0" in table, "the span loss is a difference from the baseline"
+    assert "+2.0" in table, "the duplicate gain is a difference from the baseline"

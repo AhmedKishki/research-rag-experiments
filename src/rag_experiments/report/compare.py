@@ -43,7 +43,28 @@ COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("MRR", "mrr", "Mean reciprocal rank of the target passage."),
     ("nDCG", "ndcg_at_k", "Normalized discounted cumulative gain at that depth."),
     ("doc@k", "document_success_at_k", "The target's document retrieved at all."),
+    ("spans", "mean_distinct_evidence_spans", "Different passages a result list held."),
+    (
+        "dup",
+        "mean_exact_duplicate_slots",
+        "Slots repeating another returned passage verbatim.",
+    ),
+    (
+        "near",
+        "mean_near_duplicate_slots",
+        "Slots nearly wholly inside another returned passage.",
+    ),
+    (
+        "1src",
+        "mean_same_source_pairs",
+        "Slots sharing a source file with another slot.",
+    ),
     ("srcs", "mean_distinct_sources", "Distinct sources those passages came from."),
+    (
+        "rep%",
+        "repeated_slot_rate",
+        "Slots held by a passage more than one query returned.",
+    ),
     ("withheld", "mean_withheld", "Candidates a relevance gate rejected."),
     ("p50 s", "p50_seconds", "The median measured query, in seconds."),
     ("p95 s", "p95_seconds", "The slowest measured query, in seconds."),
@@ -75,7 +96,12 @@ WIDTHS: dict[str, int] = {
     "MRR": 6,
     "nDCG": 6,
     "doc@k": 7,
+    "spans": 6,
+    "dup": 5,
+    "near": 5,
+    "1src": 5,
     "srcs": 5,
+    "rep%": 6,
     "withheld": 9,
     "p50 s": 7,
     "p95 s": 7,
@@ -128,6 +154,16 @@ def _row(arm: dict[str, Any], mode: str, split: str | None) -> dict[str, Any]:
         "document_success_at_k": overall.get("document_success_at_k"),
         "mean_distinct_sources": overall.get("mean_distinct_sources"),
         "mean_withheld": overall.get("mean_withheld"),
+        "mean_distinct_evidence_spans": overall.get("mean_distinct_evidence_spans"),
+        "mean_exact_duplicate_slots": overall.get("mean_exact_duplicate_slots"),
+        "mean_near_duplicate_slots": overall.get("mean_near_duplicate_slots"),
+        "mean_same_source_pairs": overall.get("mean_same_source_pairs"),
+        # Measured across the mode's queries rather than within one query, so it
+        # is reported per mode beside the per-query means rather than as one.
+        "repeated_slot_rate": (report or {})
+        .get("summary", {})
+        .get(mode, {})
+        .get("repeated_slot_rate"),
         "budgets": {key: values.get(key) for key, _label in BUDGET_SETTINGS},
         "present": bool(measured),
     }
@@ -208,7 +244,7 @@ def _table(split: str, mode: str, rows: list[dict[str, Any]]) -> str:
                 "policy; an ablation of a policy holds them equal."
             )
         for row in rows[1:]:
-            lines.append(_delta(baseline, row, arm_width))
+            lines.append(_delta_line(baseline, row, arm_width))
     return "\n".join(lines)
 
 
@@ -256,26 +292,40 @@ def _line(row: dict[str, Any], arm_width: int) -> str:
     return "".join(cells)
 
 
-def _delta(baseline: dict[str, Any], row: dict[str, Any], arm_width: int) -> str:
+def _delta_line(baseline: dict[str, Any], row: dict[str, Any], arm_width: int) -> str:
     cells = [f"{row['arm']:<{arm_width}}"]
     for name, key, _doc in COLUMNS[1:]:
         difference = _difference(baseline.get(key), row.get(key))
-        cells.append(f"{_format(difference, name):>{WIDTHS[name]}}")
+        cells.append(f"{_format(difference, name, delta=True):>{WIDTHS[name]}}")
     return "".join(cells)
 
 
-def _format(value: Any, column: str) -> str:
+def _format(value: Any, column: str, *, delta: bool = False) -> str:
+    """Render one cell.
+
+    A difference row carries an explicit sign, because a column of small numbers
+    is unreadable when `-2.0` and `2.0` differ only by a character a reader has to
+    hunt for. A negative zero is rendered as zero, since it is the arithmetic
+    residue of two rounded equal values and reads as a movement that is not there.
+    """
+
     if value is None:
         return ABSENT
-    if column in PERCENT_COLUMNS:
-        return f"{100.0 * float(value):6.1f}%"
+    number = float(value)
+    if number == 0.0:
+        number = 0.0
+    sign = "+" if delta and number > 0.0 else ""
+    if column in PERCENT_COLUMNS or column == "rep%":
+        return f"{sign}{100.0 * number:5.1f}%"
     if column in {"p50 s", "p95 s"}:
-        return f"{float(value):6.2f}"
+        return f"{sign}{number:6.2f}"
     if column in {"MRR", "nDCG"}:
-        return f"{float(value):5.3f}"
+        return f"{sign}{number:5.3f}"
     if column == "n":
-        return f"{int(value):>4}"
-    return f"{float(value):.1f}"
+        return f"{sign}{int(number):>4}"
+    if delta:
+        return f"{sign}{number:.1f}"
+    return f"{number:.1f}"
 
 
 def _difference(was: Any, now: Any) -> Any:

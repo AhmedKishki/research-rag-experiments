@@ -23,6 +23,9 @@ The engineering guide for AI agents working in `rag-experiments`.
     called on one, because it makes directories and rewrites the runtime pointer.
 - A quality number comes from the app's own harness. Nothing here computes one.
   - A metric the app's report stopped carrying prints as a dash, not a zero.
+  - The result-list columns are printed beside the quality ones for the same
+    reason: a known-item score is blind to a change in what a result list
+    contained, so a redundancy or repetition effect has to be readable without it.
   - The comparison does not average, weight, rank, or decide. The first arm the
     specification listed is the baseline, and it is the first arm because a
     baseline chosen after the fact is not a baseline.

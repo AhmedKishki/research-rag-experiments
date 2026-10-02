@@ -181,6 +181,18 @@ sweep varies the window on purpose, and a policy ablation is only comparable at 
 fixed one. Latency is shown as both p50 and p95, each a value that was measured
 rather than an interpolation.
 
+The result-list columns `spans`, `dup`, `near`, `1src`, and `rep%` are what a
+result list *contained* rather than how it ranked. A known-item score registers a
+change only when the designated passage crosses the depth, so a policy that
+improves evidence coverage without moving that passage is invisible to every
+quality column. The app's harness records these beside the quality ones, and a
+report written before it did carries none: they print as dashes, because a zero
+for a measure that was not taken reads as an absence of duplication.
+
+A differences row carries an explicit sign, and a negative zero is printed as
+zero, because a column of small numbers is unreadable when `-2.0` and `2.0` differ
+only by a character.
+
 `--split` tabulates one split and `--mode` one mode, for reading a single number
 in isolation.
 
