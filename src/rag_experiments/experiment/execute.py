@@ -147,6 +147,7 @@ class ArmResult:
     failure: str | None = None
     failure_stage: str | None = None
     sandbox_removed: bool = False
+    prepared: bool = False
 
     @property
     def measured(self) -> bool:
@@ -182,6 +183,10 @@ class ArmResult:
             "log": str(self.log_path),
             "measured_splits": list(self.measured_splits),
             "measured": self.measured,
+            # Whether this arm got as far as its copy, checkout, and pinned settings.
+            # A preparation run reports this for every arm it built, and a measurement
+            # run reports it for every arm that went on to search.
+            "prepared": self.prepared,
             "failure": self.failure,
             "failure_stage": self.failure_stage,
             "sandbox_removed": self.sandbox_removed,
@@ -239,6 +244,7 @@ class _Progress:
     failure: str | None = None
     failure_stage: str | None = None
     sandbox_removed: bool = False
+    prepared: bool = False
 
     def result(self, arm: Arm, log_path: Path) -> ArmResult:
         return ArmResult(
@@ -256,6 +262,7 @@ class _Progress:
             failure=self.failure,
             failure_stage=self.failure_stage,
             sandbox_removed=self.sandbox_removed,
+            prepared=self.prepared,
         )
 
 
@@ -378,6 +385,7 @@ def prepare_arm(
                 f"{selection.total_query_count} queries for {name}: "
                 f"{', '.join(selection.query_ids)}"
             )
+        progress.prepared = True
         return PreparedArm(
             arm=arm,
             engine=engine,
@@ -445,6 +453,7 @@ def run_arm(
 
     sandbox = prepared.sandbox
     engine = prepared.engine
+    progress.prepared = True
     progress.engine = engine
     progress.checkout = prepared.checkout
     progress.sandbox = sandbox
@@ -632,6 +641,29 @@ def _selection(spec: RunSpec, split: JudgedSet) -> QuerySelection:
             for flag in SELECTION_FLAGS
             if spec.harness.get(flag) is not None
         },
+    )
+
+
+def prepared_result(prepared: PreparedArm) -> ArmResult:
+    """An arm that was built and measured nothing, as a record entry.
+
+    A preparation run resolves each arm and stops, and the record's arms are one
+    shape whether a run measured them or not: a reader comparing two runs must not
+    have to know which kind of run it is reading to find out what an arm did.
+    """
+
+    return ArmResult(
+        arm=prepared.arm,
+        engine=prepared.engine,
+        checkout=prepared.checkout,
+        sandbox=prepared.sandbox,
+        settings=prepared.settings,
+        environment=prepared.environment,
+        prepare=[],
+        validate=(),
+        measure=(),
+        log_path=prepared.log_path,
+        prepared=True,
     )
 
 
@@ -963,6 +995,7 @@ __all__ = [
     "PreparedArm",
     "effective_overlay",
     "prepare_arm",
+    "prepared_result",
     "requested_modes",
     "run_arm",
 ]

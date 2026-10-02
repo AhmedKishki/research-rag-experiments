@@ -16,6 +16,7 @@ import pytest
 
 from rag_experiments.report.record import (
     GUARD_UNKNOWN,
+    KIND_PREPARATION,
     RECORD_NAME,
     RECORD_SCHEMA_VERSION,
     VERDICT_ENGINE_CHANGED,
@@ -23,6 +24,7 @@ from rag_experiments.report.record import (
     VERDICT_INCOMPLETE,
     VERDICT_INTERRUPTED,
     VERDICT_NO_ARMS,
+    VERDICT_PREPARED,
     VERDICT_SOURCE_CHANGED,
     VERDICT_VERIFIED,
     SourceGuard,
@@ -41,7 +43,15 @@ STILL_ENGINE = {
 
 
 def _measured(name: str) -> dict[str, object]:
-    return {"arm": {"name": name}, "measured": True}
+    return {"arm": {"name": name}, "measured": True, "prepared": True}
+
+
+def _prepared(name: str) -> dict[str, object]:
+    return {"arm": {"name": name}, "measured": False, "prepared": True}
+
+
+def _unprepared(name: str) -> dict[str, object]:
+    return {"arm": {"name": name}, "measured": False, "prepared": False}
 
 
 def _write(
@@ -52,11 +62,13 @@ def _write(
     engine: dict[str, object] | None = None,
     error: str | None = None,
     interruption: str | None = None,
+    kind: str = "measurement",
 ) -> Path:
     listed = [_measured(f"arm{index}") for index in range(1)] if arms is None else arms
     return write_record(
         directory,
         name="fixture",
+        kind=kind,
         elapsed_seconds=1.5,
         spec={"name": "fixture"},
         engine=dict(STILL_ENGINE if engine is None else engine),
@@ -68,6 +80,86 @@ def _write(
         error=error,
         interruption=interruption,
     )
+
+
+def test_a_preparation_that_prepared_every_arm_is_prepared(
+    project: Path, tmp_path: Path
+) -> None:
+    guard = close_guard(take_guard(project))
+    path = _write(
+        tmp_path / "run",
+        arms=[_prepared("arm0"), _prepared("arm1")],
+        guard=guard,
+        kind=KIND_PREPARATION,
+    )
+    record = json.loads(path.read_text(encoding="utf-8"))
+    # A preparation is not a measurement that found nothing: it searched nothing, so
+    # it carries no quality claim at all.
+    assert record["verdict"] == VERDICT_PREPARED
+    assert record["run"]["kind"] == "preparation"
+    assert record["measured_arm_count"] == 0
+    assert record["prepared_arm_count"] == 2
+    assert record["run"]["complete"] is True
+
+
+def test_a_preparation_with_an_unprepared_arm_failed(
+    project: Path, tmp_path: Path
+) -> None:
+    guard = close_guard(take_guard(project))
+    path = _write(
+        tmp_path / "run",
+        arms=[_prepared("arm0"), _unprepared("arm1")],
+        guard=guard,
+        kind=KIND_PREPARATION,
+        error="Arm 'arm1' refused at prepare.",
+    )
+    assert _verdict(path) == VERDICT_FAILED
+
+
+def test_a_preparation_that_measured_nothing_and_refused_nothing_is_not_failed(
+    project: Path, tmp_path: Path
+) -> None:
+    # A healthy preparation has no measured arms at all. That is not the condition
+    # `failed` names, and treating it as one would make every clean preflight look
+    # like a refusal.
+    guard = close_guard(take_guard(project))
+    path = _write(tmp_path / "run", arms=[], guard=guard, kind=KIND_PREPARATION)
+    assert _verdict(path) == VERDICT_PREPARED
+
+
+def test_a_preparation_whose_source_changed_is_not_prepared(
+    project: Path, tmp_path: Path
+) -> None:
+    before = take_guard(project)
+    (project / "sources" / "a-book.pdf").write_bytes(b"%PDF-1.7\nchanged")
+    path = _write(
+        tmp_path / "run",
+        arms=[_prepared("arm0")],
+        guard=close_guard(before),
+        kind=KIND_PREPARATION,
+    )
+    assert _verdict(path) == VERDICT_SOURCE_CHANGED
+
+
+def test_an_interrupted_preparation_is_its_own_verdict(
+    project: Path, tmp_path: Path
+) -> None:
+    guard = close_guard(take_guard(project))
+    path = _write(
+        tmp_path / "run",
+        arms=[_prepared("arm0")],
+        guard=guard,
+        kind=KIND_PREPARATION,
+        interruption="KeyboardInterrupt: ",
+    )
+    assert _verdict(path) == VERDICT_INTERRUPTED
+
+
+def test_a_measurement_run_is_never_prepared(project: Path, tmp_path: Path) -> None:
+    guard = close_guard(take_guard(project))
+    path = _write(tmp_path / "run", arms=[_measured("arm0")], guard=guard)
+    assert _verdict(path) == VERDICT_VERIFIED
+    assert json.loads(path.read_text(encoding="utf-8"))["run"]["kind"] == "measurement"
 
 
 def _verdict(path: Path) -> str:

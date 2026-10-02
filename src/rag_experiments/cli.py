@@ -18,19 +18,22 @@ import sys
 from pathlib import Path
 
 from . import toolkit_version
-from .engine import locate_engine
+from .engine.locate import EngineSource, locate_engine
 from .errors import ExperimentError
-from .experiment import load_spec
+from .experiment import RunSpec, load_spec
 from .report import VERDICT_ENGINE_CHANGED, VERDICT_SOURCE_CHANGED
 from .report.compare import render_comparison
 from .report.record import (
     RECORD_NAME,
+    VERDICT_FAILED,
     VERDICT_INCOMPLETE,
     VERDICT_INTERRUPTED,
+    VERDICT_NO_ARMS,
+    VERDICT_PREPARED,
     VERDICT_VERIFIED,
     read_record,
 )
-from .run import new_run_id, run_experiment
+from .run import RunOutcome, prepare_experiment, run_experiment
 from .sandbox import (
     create,
     list_sandboxes,
@@ -61,9 +64,14 @@ EXIT_ENGINE_CHANGED = 4
 #: A run that stopped part-way: some arms measured, some did not.
 EXIT_INCOMPLETE = 2
 
-#: The exit code for a run that completed its measurement, and for every command
+#: The exit code for a run that completed its measurement, for a preparation run
+#: that resolved every arm and left the source project alone, and for every command
 #: whose success is the absence of a problem.
 EXIT_VERIFIED = 0
+
+#: The exit code for a refusal, a failed run, and a run that measured nothing. These
+#: are conditions a reader acts on rather than measurements they can trust.
+EXIT_REFUSED = 1
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -286,47 +294,51 @@ def _run(args: argparse.Namespace) -> int:
     return _status_for(outcome.verdict)
 
 
-def _dry_run(args: argparse.Namespace, spec: object, engine: object) -> int:
-    """Prepare every arm and measure nothing.
+def _dry_run(args: argparse.Namespace, spec: RunSpec, engine: EngineSource) -> int:
+    """Resolve every arm, measure nothing, and record what it proved.
 
-    A dry run gets its own run identifier and its own workspace prefix, like a real
-    run, so the real run after it cannot collide with what this one created.
+    A dry run is a run of kind `preparation`: the same guard over the same source
+    project, the same copies, the same settings resolution, and the same record. It
+    runs no prepare command and no search, and its verdict is `prepared`, which says
+    every arm could be built and the corpus was not written to — and says nothing at
+    all about quality, because nothing was searched.
+
+    It gets its own run identifier, so the run that measures after it collides with
+    nothing and this one can be read on its own.
     """
 
-    from .experiment import ArmFailure, prepare_arm
-    from .experiment.spec import segment
-
-    runs = Path(args.runs).expanduser().resolve()
-    run_id = new_run_id(f"{spec.name}-dry-run", runs)
-    workspace = Path(args.workspace).expanduser().resolve()
-    for arm in spec.arms:
-        arm_directory = runs / run_id / segment(arm.name)
-        try:
-            prepared = prepare_arm(
-                spec,
-                arm,
-                workspace=workspace,
-                sandbox_name=f"{run_id}-{segment(arm.name)}",
-                arm_directory=arm_directory,
-                app_source=engine,
-            )
-        except (ArmFailure, ExperimentError) as exc:
-            print(f"arm {arm.name}: refused", file=sys.stderr)
-            print(f"  {exc}", file=sys.stderr)
-            return 1
-        print(f"arm {arm.name}: {arm.kind}")
-        print(f"  sandbox:   {prepared.sandbox.root}")
-        print(f"  engine:    {prepared.engine.root}")
-        if prepared.checkout is not None:
-            print(f"  checkout:  base {prepared.checkout.base_revision}")
-        print(f"  settings:  {prepared.settings['document_sha256'][:16]}")
-        print(f"  log:       {prepared.log_path}")
-    print(f"Nothing was measured. Run directory (prepared, no record): {runs / run_id}")
-    return EXIT_VERIFIED
+    outcome = prepare_experiment(
+        spec,
+        app_source=engine,
+        workspace=args.workspace,
+        runs_directory=args.runs,
+        keep_sandboxes=args.keep_sandboxes,
+    )
+    _report(outcome)
+    for arm in outcome.record.get("arms") or []:
+        settings = arm.get("settings") or {}
+        sandbox = arm.get("sandbox") or {}
+        print(
+            f"arm {(arm.get('arm') or {}).get('name')}: "
+            f"{(arm.get('arm') or {}).get('kind')}"
+        )
+        print(f"  sandbox:   {sandbox.get('root')}")
+        checkout = arm.get("checkout")
+        if checkout is not None:
+            print(f"  checkout:  base {checkout.get('base_revision')}")
+        print(f"  settings:  {str(settings.get('document_sha256'))[:16]}")
+        print(f"  log:       {arm.get('log')}")
+    print(
+        f"Nothing was measured: this run prepared {outcome.record.get('prepared_arm_count')} of {len(spec.arms)} arms."
+    )
+    print(f"record: {outcome.record_path}")
+    return _status_for(outcome.verdict)
 
 
 def _status_for(verdict: str) -> int:
-    if verdict == VERDICT_VERIFIED:
+    if verdict in {VERDICT_VERIFIED, VERDICT_PREPARED}:
+        # A preparation run succeeded; it is not a measurement, and its own status
+        # says so without the exit code turning a clean preflight into a failure.
         return EXIT_VERIFIED
     if verdict == VERDICT_SOURCE_CHANGED:
         return EXIT_SOURCE_CHANGED
@@ -334,15 +346,60 @@ def _status_for(verdict: str) -> int:
         return EXIT_ENGINE_CHANGED
     if verdict in {VERDICT_INCOMPLETE, VERDICT_INTERRUPTED}:
         return EXIT_INCOMPLETE
-    return 1
+    if verdict in {VERDICT_FAILED, VERDICT_NO_ARMS}:
+        # A failed run and a run that measured nothing are both conditions a reader
+        # acts on rather than measurements they can trust.
+        return EXIT_REFUSED
+    raise ExperimentError(
+        f"This run's record carries the verdict {verdict!r}, which this command does "
+        f"not know. A verdict nobody recognises is not a measurement, so it is "
+        f"refused rather than reported as one."
+    )
 
 
-def _report(verdict: str) -> None:
-    if verdict == VERDICT_VERIFIED:
+def _report(outcome: RunOutcome) -> None:
+    """Say on stderr why a run is not a measurement, and nothing more.
+
+    The verdict line is the whole claim. The reason is the first lines of the
+    message the record carries, because a status alone leaves a reader guessing which
+    arm refused, and the whole message is a command, its output, and a log path: it
+    belongs in the record, and it is a page long on stderr.
+    """
+
+    verdict = outcome.verdict
+    if verdict in {VERDICT_VERIFIED, VERDICT_PREPARED}:
         return
     print(
-        f"{PROGRAM}: this run is not a verified measurement: {verdict}", file=sys.stderr
+        f"{PROGRAM}: this run is not a verified measurement: {verdict}",
+        file=sys.stderr,
     )
+    for line in _first_lines(outcome.error):
+        print(f"  {line}", file=sys.stderr)
+
+
+#: How much of one line of a failure message reaches stderr, and how many lines.
+#: An app message can name every setting it declares in a single line, and a
+#: terminal is not the place for it: the record holds the whole message.
+ERROR_LINE_CHARS = 160
+ERROR_LINES = 4
+
+
+def _first_lines(text: str | None, count: int = ERROR_LINES) -> list[str]:
+    """The opening lines of a multi-line message, each cut to a readable length."""
+
+    if not text:
+        return []
+    lines = [line.strip() for line in str(text).splitlines() if line.strip()]
+    chosen = lines[:count]
+    if len(lines) > count:
+        chosen.append(
+            f"... and {len(lines) - count} more line(s); the record has the whole "
+            f"message"
+        )
+    return [
+        line if len(line) <= ERROR_LINE_CHARS else f"{line[:ERROR_LINE_CHARS]}..."
+        for line in chosen
+    ]
 
 
 def _sandbox(args: argparse.Namespace) -> int:
@@ -463,6 +520,7 @@ __all__ = [
     "APP_SOURCE_ENV",
     "EXIT_ENGINE_CHANGED",
     "EXIT_INCOMPLETE",
+    "EXIT_REFUSED",
     "EXIT_SOURCE_CHANGED",
     "EXIT_VERIFIED",
     "PROGRAM",

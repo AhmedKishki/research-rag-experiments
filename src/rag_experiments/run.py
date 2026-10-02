@@ -41,7 +41,15 @@ from typing import Any
 
 from .engine.locate import EngineSource, tree_digest
 from .errors import ExperimentError
-from .experiment import ArmFailure, ArmResult, RunSpec, run_arm, segment
+from .experiment import (
+    ArmFailure,
+    ArmResult,
+    RunSpec,
+    prepare_arm,
+    prepared_result,
+    run_arm,
+    segment,
+)
 from .experiment.execute import ARM_EVIDENCE
 from .report import record as run_record
 from .report.compare import render_comparison
@@ -51,6 +59,12 @@ from .sandbox import Snapshot, read_layout, refuse_nested, selected_generation
 #: than referenced, because a judged set edited after the run would leave a record
 #: whose digest and whose content disagree.
 JUDGED_DIRECTORY = "judged"
+
+#: What a run did. A preparation run resolves every arm without searching, so it
+#: can say nothing about quality and claims only that each arm could be built; a
+#: measurement run searched and can carry a number.
+KIND_MEASUREMENT = "measurement"
+KIND_PREPARATION = "preparation"
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,7 +84,23 @@ class RunOutcome:
 
     @property
     def verified(self) -> bool:
+        """Whether this run is a measurement that counts.
+
+        A preparation run never is: it searched nothing, so it carries no quality
+        claim however cleanly it went.
+        """
+
         return self.verdict == run_record.VERDICT_VERIFIED
+
+    @property
+    def prepared(self) -> bool:
+        """Whether every arm of a preparation run was built and left the source alone."""
+
+        return self.verdict == run_record.VERDICT_PREPARED
+
+    @property
+    def kind(self) -> str:
+        return str((self.record.get("run") or {}).get("kind") or "")
 
     @property
     def error(self) -> str | None:
@@ -103,12 +133,69 @@ def run_experiment(
     returned outcome rather than from an exception that carried no numbers.
     """
 
+    return _execute(
+        spec,
+        app_source=app_source,
+        workspace=workspace,
+        runs_directory=runs_directory,
+        keep_sandboxes=keep_sandboxes,
+        validate_first=validate_first,
+        kind=KIND_MEASUREMENT,
+    )
+
+
+def prepare_experiment(
+    spec: RunSpec,
+    *,
+    app_source: EngineSource,
+    workspace: Path,
+    runs_directory: Path,
+    keep_sandboxes: bool = True,
+) -> RunOutcome:
+    """Resolve every arm of a specification and measure nothing, under the guard.
+
+    This is a dry run as a run: the same guard over the same source project, the same
+    copies, the same settings resolution, the same finalizer, and the same record. It
+    runs no prepare command and no search, because both of those are what a dry run
+    exists to avoid. Its verdict is `prepared`, which says each arm could be built and
+    the corpus was not written to, and says nothing about quality: a search that would
+    have measured nothing has not been shown.
+
+    It gets its own run identifier and its own record, so the run that measures after
+    it collides with nothing and the preparation can be read on its own.
+    """
+
+    return _execute(
+        spec,
+        app_source=app_source,
+        workspace=workspace,
+        runs_directory=runs_directory,
+        keep_sandboxes=keep_sandboxes,
+        validate_first=False,
+        kind=KIND_PREPARATION,
+    )
+
+
+def _execute(
+    spec: RunSpec,
+    *,
+    app_source: EngineSource,
+    workspace: Path,
+    runs_directory: Path,
+    keep_sandboxes: bool,
+    validate_first: bool,
+    kind: str,
+) -> RunOutcome:
+    """One run, measured or prepared, through the guard and the same finalizer."""
+
     _refuse_before_anything(spec, app_source, workspace, runs_directory)
 
     workspace = Path(workspace).expanduser().resolve()
     runs = Path(runs_directory).expanduser().resolve()
     runs.mkdir(parents=True, exist_ok=True)
-    run_id = new_run_id(spec.name, runs)
+    run_id = new_run_id(
+        spec.name if kind == KIND_MEASUREMENT else f"{spec.name}-prepared", runs
+    )
     run_directory = runs / run_id
     run_directory.mkdir()
 
@@ -137,6 +224,7 @@ def run_experiment(
             run_id=run_id,
             keep_sandboxes=keep_sandboxes,
             validate_first=validate_first,
+            kind=kind,
         )
     except BaseException as exc:
         # A KeyboardInterrupt or a SystemExit lands here, and so does anything the
@@ -159,6 +247,7 @@ def run_experiment(
             results=results,
             error=error,
             interruption=interruption,
+            kind=kind,
         )
         if interruption is not None:
             print(
@@ -196,19 +285,38 @@ def _measure_all(
     run_id: str,
     keep_sandboxes: bool,
     validate_first: bool,
+    kind: str,
 ) -> str | None:
-    """Measure each arm in turn, stopping at the first refusal, and say why.
+    """Measure or prepare each arm in turn, stopping at the first refusal.
 
     One arm refusing stops the run rather than continuing, because the arms of a
-    specification are a comparison and a later arm measured against a corpus an
-    earlier arm disturbed says nothing. The results list is the caller's, so an
-    interrupt on the way out still leaves it holding every arm that was attempted.
+    specification are a comparison and a later arm built against a corpus an earlier
+    arm disturbed says nothing. The results list is the caller's, so an interrupt on
+    the way out still leaves it holding every arm that was attempted.
+
+    A preparation run stops at `prepare_arm`: the copy, the checkout, the patch, and
+    the settings resolution, and nothing else. No prepare command and no search runs,
+    because a dry run that ran either would not be one.
 
     The message returned is the one the record carries as its error.
     """
 
     for arm in spec.arms:
         try:
+            if kind == KIND_PREPARATION:
+                results.append(
+                    prepared_result(
+                        prepare_arm(
+                            spec,
+                            arm,
+                            workspace=workspace,
+                            sandbox_name=f"{run_id}-{segment(arm.name)}",
+                            arm_directory=run_directory / segment(arm.name),
+                            app_source=app_source,
+                        )
+                    )
+                )
+                continue
             results.append(
                 run_arm(
                     spec,
@@ -253,6 +361,7 @@ def _finalize(
     results: list[ArmResult],
     error: str | None,
     interruption: str | None,
+    kind: str,
 ) -> RunOutcome:
     """Write the record, whatever happened, and never raise doing it."""
 
@@ -276,10 +385,12 @@ def _finalize(
     }
     arms = [result.describe() for result in results]
     measured = sum(1 for result in results if result.measured)
+    prepared = sum(1 for result in results if result.prepared)
     try:
         record_path = run_record.write_record(
             run_directory,
             name=spec.name,
+            kind=kind,
             elapsed_seconds=time.perf_counter() - started_at,
             spec={**spec.describe(), "run_id": run_id},
             engine=engine,
@@ -294,6 +405,7 @@ def _finalize(
             error=error,
             interruption=interruption,
             measured_arms=measured,
+            prepared_arms=prepared,
         )
         record = run_record.read_record(run_directory)
     except OSError as exc:
@@ -412,4 +524,11 @@ def _digest(path: Path) -> str:
     return accumulator.hexdigest()
 
 
-__all__ = ["RunOutcome", "new_run_id", "run_experiment"]
+__all__ = [
+    "KIND_MEASUREMENT",
+    "KIND_PREPARATION",
+    "RunOutcome",
+    "new_run_id",
+    "prepare_experiment",
+    "run_experiment",
+]

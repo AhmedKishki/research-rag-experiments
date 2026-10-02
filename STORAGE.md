@@ -27,16 +27,20 @@ owns.
     └── (nothing else)
 
 <runs>/                                      the run area: small and durable
-└── <run-id>/                                 <specification name>-<timestamp>
-    ├── run.json                             the record
-    ├── judged/<split>.json                  the judged bytes this run measured
-    └── <arm>/                               one directory per arm
-        ├── arm.log                          every command, exit, and output
-        ├── report-<split>.json              the app's harness report, per split
-        ├── engine/                          a code arm's clone of the tree
-        ├── engine-source.json               what the tree held when it was copied
-        ├── engine-source.diff               its uncommitted tracked changes
-        └── patch.diff                       the arm's patch, as applied
+├── <name>-<timestamp>/                      a measurement
+│   ├── run.json                             the record
+│   ├── judged/<split>.json                  the judged bytes this run measured
+│   └── <arm>/                               one directory per arm
+│       ├── arm.log                          every command, exit, and output
+│       ├── report-<split>.json              the app's harness report, per split
+│       ├── engine/                          a code arm's clone of the tree
+│       ├── engine-source.json               what the tree held when it was copied
+│       ├── engine-source.diff               its uncommitted tracked changes
+│       └── patch.diff                       the arm's patch, as applied
+└── <name>-prepared-<timestamp>/             a preparation: `--dry-run`
+    ├── run.json                             the same record, kind `preparation`
+    ├── judged/<split>.json                  the judged bytes it would measure
+    └── <arm>/                               the same layout, with no report
 ```
 
 A run's directory name is never reused. Two runs of one specification are two
@@ -55,10 +59,11 @@ says which command refused and where its log is.
 | `schema_version` | 2 |
 | `toolkit_version` | the version that wrote it |
 | `verdict` | the one field to read before any number; see below |
-| `run` | name, start, finish, elapsed, directory, and whether the run completed |
+| `run` | name, kind, start, finish, elapsed, directory, and whether it completed |
 | `error` | the message that stopped the run, verbatim |
 | `interruption` | the interrupt that ended it, if one did |
 | `measured_arm_count` | arms that measured every split they were asked for |
+| `prepared_arm_count` | arms that got as far as their copy, checkout, and settings |
 | `specification` | the specification, as read, with the run identifier |
 | `engine` | root, revision, branch, dirty, and the content digest before and after |
 | `judgments` | each split: its path, its digest, and the copy kept under the run |
@@ -73,7 +78,8 @@ did not move while the arms ran, and nothing stopped the run.
 
 | Verdict | What it means |
 |---|---|
-| `verified` | all of the above held |
+| `verified` | all of the above held, and `run.kind` is `measurement` |
+| `prepared` | every arm was resolved and no search ran; no quality claim at all |
 | `source_project_changed` | the corpus moved; the arms ran against something else |
 | `engine_source_changed` | the engine's own files moved under the run |
 | `interrupted` | the run was interrupted; arms already measured are kept |
@@ -83,6 +89,20 @@ did not move while the arms ran, and nothing stopped the run.
 
 The order is the argument: a moved corpus says more than a moved engine, which
 says more than a stopped run.
+
+`run.kind` is `measurement` or `preparation`, and the two are read differently. A
+preparation is what `--dry-run` produces: the same guard over the same source
+project, the same copies, the same checkout and settings resolution, and this same
+record, with no prepare command and no search run. Its verdict is `prepared`, which
+says every arm could be built and the corpus was not written to — and says nothing
+about quality, because nothing was searched. Its exit status is 0 only when the
+guard was unchanged and every arm prepared; a refused arm, an interrupted
+preparation, or a corpus that moved is a nonzero status with the record's path.
+
+`prepared` is a state of its own rather than a flavour of `verified` because a
+preparation holds no measurement: `measured_arm_count` is 0 and `measured` is false
+for every arm, and reading it as a measurement that found nothing would be exactly
+the wrong reading.
 
 ### `source_project.guard`
 

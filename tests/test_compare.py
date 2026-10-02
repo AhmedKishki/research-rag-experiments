@@ -721,3 +721,15 @@ def test_stage_denominators_and_unjudged_no_answer_scope_are_visible(tmp_path):
     assert "final=0.700 (30/30)" in table
     assert 'no-answer scope: baseline: "unjudged"' in table
     assert "post_collapse_pool=[36] collapsed=[4]" in table
+
+
+def test_prepared_record_is_not_presented_as_a_verified_measurement():
+    record = {
+        "verdict": "prepared",
+        "source_project": {"guard": {"state": "unchanged"}},
+        "arms": [],
+    }
+    text = render_comparison(record)
+    assert text.startswith("PREPARATION ONLY: no measurements")
+    assert "source guard unchanged" in text
+    assert "No arm of this run reported a measured mode" in text

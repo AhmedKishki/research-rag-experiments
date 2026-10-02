@@ -9,6 +9,8 @@ not the one on disk, which is a different condition from a refusal.
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -25,6 +27,7 @@ from rag_experiments.report.record import (
     RECORD_NAME,
     VERDICT_ENGINE_CHANGED,
     VERDICT_INCOMPLETE,
+    VERDICT_PREPARED,
     VERDICT_VERIFIED,
 )
 from rag_experiments.sandbox import create, list_sandboxes, snapshot
@@ -249,15 +252,116 @@ def test_a_dry_run_prepares_every_arm_and_measures_nothing(
             "--dry-run",
         ]
     )
-    out = capsys.readouterr().out
+    captured = capsys.readouterr()
     assert status == EXIT_VERIFIED
-    assert "arm baseline" in out
-    assert "arm deeper" in out
-    assert "Nothing was measured" in out
-    # No report is written and no run record exists: a dry run is a check, not a
-    # measurement, and a reader must not find a record claiming otherwise.
-    assert not list((tmp_path / "runs").rglob(RECORD_NAME))
+    assert "arm baseline" in captured.out
+    assert "arm deeper" in captured.out
+    assert "Nothing was measured" in captured.out
+    # A dry run is a run of kind `preparation`, and it leaves a record saying so. A
+    # preparation that proved nothing would leave the reader with no evidence at all.
+    records = list((tmp_path / "runs").rglob(RECORD_NAME))
+    assert len(records) == 1
+    record = json.loads(records[0].read_text(encoding="utf-8"))
+    assert record["run"]["kind"] == "preparation"
+    assert record["verdict"] == VERDICT_PREPARED
+    assert record["run"]["complete"] is True
+    assert record["source_project"]["guard"]["state"] == "unchanged"
+    assert record["measured_arm_count"] == 0
+    assert record["prepared_arm_count"] == 2
+    assert [arm["measured"] for arm in record["arms"]] == [False, False]
+    assert all(arm["prepared"] for arm in record["arms"])
+    # Nothing was searched, so no arm holds a report or a measurement.
+    assert all(arm["measure"] == [] for arm in record["arms"])
+    assert all(arm["reports"] == {} for arm in record["arms"])
+    assert "record:" in captured.out
+    assert captured.err == "", "a clean preparation says nothing on stderr"
     assert snapshot(project).digest() == before
+
+
+def test_a_failed_run_says_why_on_stderr_and_keeps_the_record_on_stdout(
+    make_spec,
+    project: Path,
+    workspace: Path,
+    app_source: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # A status code alone leaves a reader guessing which arm refused; the reason is
+    # on stderr, the record's path on stdout, and neither is the whole report.
+    spec_path = make_spec(
+        [{"name": "bad", "kind": "settings", "overlay": {"retrieval.nope": 1}}]
+    )
+    status = main(
+        [
+            "run",
+            "--spec",
+            str(spec_path),
+            "--app-source",
+            str(app_source),
+            "--workspace",
+            str(workspace),
+            "--runs",
+            str(tmp_path / "runs"),
+        ]
+    )
+    captured = capsys.readouterr()
+    assert status == 1
+    assert "not a verified measurement: failed" in captured.err
+    assert "retrieval.nope" in captured.err
+    # The reason is the opening of the record's error, cut to a readable length: the
+    # record holds the commands, the logs, and the guard, and stderr does not. The
+    # app's own message names every setting it declares in one line, so a line cap is
+    # what keeps a terminal readable.
+    assert len(captured.err.splitlines()) <= 8
+    assert all(len(line) <= 200 for line in captured.err.splitlines())
+    assert "record:" in captured.out
+    assert "RunOutcome(" not in captured.err
+    record = next((tmp_path / "runs").rglob(RECORD_NAME))
+    assert json.loads(record.read_text(encoding="utf-8"))["error"]
+
+
+def test_a_successful_run_says_nothing_on_stderr(
+    make_spec,
+    project: Path,
+    workspace: Path,
+    app_source: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A run that is a measurement has nothing to apologise for on stderr. This is the
+    # case a wrong argument to the reporter broke: the whole record was written there.
+    monkeypatch.setattr(
+        "rag_experiments.cli.render_comparison", lambda record: "arm baseline\n"
+    )
+    spec_path = make_spec([{"name": "baseline", "kind": "settings", "overlay": {}}])
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys; from rag_experiments.cli import main; "
+                "sys.exit(main(sys.argv[1:]))"
+            ),
+            "run",
+            "--spec",
+            str(spec_path),
+            "--app-source",
+            str(app_source),
+            "--workspace",
+            str(workspace),
+            "--runs",
+            str(tmp_path / "runs"),
+            "--dry-run",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=str(Path(__file__).resolve().parents[1]),
+        check=False,
+    )
+    assert completed.returncode == EXIT_VERIFIED, completed.stderr
+    assert completed.stderr == ""
+    assert "record:" in completed.stdout
 
 
 def test_a_dry_run_refuses_an_unknown_setting_before_measuring(
@@ -461,11 +565,14 @@ def test_a_dry_run_and_the_real_run_after_it_both_work(
     ]
     assert main([*arguments, "--dry-run"]) == EXIT_VERIFIED
     out = capsys.readouterr().out
-    prepared = next((tmp_path / "runs").glob("fixture-dry-run-*"), None)
-    assert prepared is not None, out
-    # The dry run wrote the log of every arm it prepared, and no record.
-    assert (prepared / "baseline" / "arm.log").is_file()
-    assert not list((tmp_path / "runs").rglob(RECORD_NAME))
+    preparation = next((tmp_path / "runs").glob("fixture-prepared-*"), None)
+    assert preparation is not None, out
+    # The preparation wrote the log of every arm it resolved, and a record saying it
+    # measured nothing.
+    assert (preparation / "baseline" / "arm.log").is_file()
+    record = json.loads((preparation / RECORD_NAME).read_text(encoding="utf-8"))
+    assert record["verdict"] == VERDICT_PREPARED
+    assert record["run"]["kind"] == "preparation"
 
 
 def _record_run(

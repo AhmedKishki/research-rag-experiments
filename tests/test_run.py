@@ -15,6 +15,7 @@ import json
 import os
 import subprocess
 from pathlib import Path
+from typing import Any
 
 import pytest
 from conftest import (
@@ -33,10 +34,12 @@ from rag_experiments.report.record import (
     VERDICT_INCOMPLETE,
     VERDICT_INTERRUPTED,
     VERDICT_NO_ARMS,
+    VERDICT_PREPARED,
     VERDICT_SOURCE_CHANGED,
     VERDICT_VERIFIED,
 )
-from rag_experiments.run import run_experiment
+from rag_experiments.run import prepare_experiment, run_experiment
+from rag_experiments.sandbox import Snapshot
 
 #: The stub harness stands in for the app's own evaluation script. It reads the
 #: flags the run builds, checks that the corpus it was handed is a copy rather than
@@ -533,13 +536,248 @@ def test_a_dry_run_then_a_real_run_both_succeed(
         "--runs",
         str(tmp_path / "runs"),
     ]
+    # The preparation and the measurement are two runs with two records, so the
+    # measurement cannot overwrite what the preparation proved, and the preparation
+    # cannot be mistaken for a measurement.
     assert main([*arguments, "--dry-run"]) == 0
     capsys.readouterr()
-    assert not list((tmp_path / "runs").rglob("run.json"))
+    preparation = json.loads(
+        next((tmp_path / "runs").rglob("run.json")).read_text(encoding="utf-8")
+    )
+    assert preparation["run"]["kind"] == "preparation"
+    assert preparation["verdict"] == VERDICT_PREPARED
 
     assert main(arguments) == 0
     out = capsys.readouterr().out
     assert "record:" in out
+    records = sorted(
+        (
+            json.loads(path.read_text(encoding="utf-8"))
+            for path in (tmp_path / "runs").rglob("run.json")
+        ),
+        key=lambda record: record["run"]["started_at"],
+    )
+    assert [record["run"]["kind"] for record in records] == [
+        "preparation",
+        "measurement",
+    ]
+    assert [record["verdict"] for record in records] == [
+        VERDICT_PREPARED,
+        VERDICT_VERIFIED,
+    ]
+    assert records[0]["measured_arm_count"] == 0
+    assert records[1]["measured_arm_count"] == 1
+    assert records[0]["run"]["directory"] != records[1]["run"]["directory"]
+    # The preparation searched nothing: no report and no measurement in either arm.
+    assert all(arm["measure"] == [] for arm in records[0]["arms"])
+
+
+def test_a_preparation_that_fails_leaves_a_record_and_is_refused(
+    project: Path, workspace: Path, tmp_path: Path, stub_engine: Path
+) -> None:
+    from rag_experiments.cli import main
+
+    spec = _spec_file(
+        tmp_path,
+        project,
+        arms=[
+            {
+                "name": "bad",
+                "kind": "settings",
+                "overlay": {"retrieval.no_such_knob": 1},
+            }
+        ],
+        harness={"modes": ["bm25"]},
+    )
+    status = main(
+        [
+            "run",
+            "--spec",
+            str(spec),
+            "--app-source",
+            str(stub_engine),
+            "--workspace",
+            str(workspace),
+            "--runs",
+            str(tmp_path / "runs"),
+            "--dry-run",
+        ]
+    )
+    assert status == 1
+    record = json.loads(
+        next((tmp_path / "runs").rglob("run.json")).read_text(encoding="utf-8")
+    )
+    assert record["run"]["kind"] == "preparation"
+    # A preparation that refused is a failed preparation, not a healthy one that
+    # measured nothing.
+    assert record["verdict"] == VERDICT_FAILED
+    assert record["error"] and "retrieval.no_such_knob" in record["error"]
+    assert record["prepared_arm_count"] == 0
+    assert record["arms"][0]["prepared"] is False
+    assert record["arms"][0]["failure_stage"] == "prepare"
+    # The guard was closed around it anyway, so the record says the corpus is intact.
+    assert record["source_project"]["guard"]["state"] == "unchanged"
+
+
+def test_a_preparation_that_was_interrupted_leaves_a_record(
+    project: Path, workspace: Path, tmp_path: Path, stub_engine: Path, monkeypatch
+) -> None:
+    from rag_experiments import run as run_module
+
+    spec = _spec_file(
+        tmp_path,
+        project,
+        arms=[{"name": "baseline", "kind": "settings", "overlay": {}}],
+        harness={"modes": ["bm25"]},
+    )
+    real = run_module.prepare_arm
+
+    def _interrupted(*args: Any, **kwargs: Any):
+        real(*args, **kwargs)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(run_module, "prepare_arm", _interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        prepare_experiment(
+            load_spec(spec),
+            app_source=locate_engine(stub_engine),
+            workspace=workspace,
+            runs_directory=tmp_path / "runs",
+        )
+    record = json.loads(
+        next((tmp_path / "runs").rglob("run.json")).read_text(encoding="utf-8")
+    )
+    assert record["run"]["kind"] == "preparation"
+    assert record["verdict"] == VERDICT_INTERRUPTED
+    assert record["interruption"].startswith("KeyboardInterrupt")
+    assert record["source_project"]["guard"]["state"] == "unchanged"
+
+
+def test_a_preparation_whose_source_moved_is_not_a_clean_one(
+    project: Path, workspace: Path, tmp_path: Path, stub_engine: Path, monkeypatch
+) -> None:
+    from rag_experiments.cli import main
+    from rag_experiments.report import record as record_module
+
+    spec = _spec_file(
+        tmp_path,
+        project,
+        arms=[{"name": "baseline", "kind": "settings", "overlay": {}}],
+        harness={"modes": ["bm25"]},
+    )
+    # The closing digest cannot be taken, which is a preparation that proved nothing
+    # about the corpus rather than one that proved the corpus was left alone.
+    real = record_module.snapshot
+    seen = {"calls": 0}
+
+    def _refusing(root: Path):
+        seen["calls"] += 1
+        if seen["calls"] == 2:
+            raise OSError("the project went away mid-preparation")
+        return real(root)
+
+    monkeypatch.setattr(record_module, "snapshot", _refusing)
+    status = main(
+        [
+            "run",
+            "--spec",
+            str(spec),
+            "--app-source",
+            str(stub_engine),
+            "--workspace",
+            str(workspace),
+            "--runs",
+            str(tmp_path / "runs"),
+            "--dry-run",
+        ]
+    )
+    assert status == 1
+    record = json.loads(
+        next((tmp_path / "runs").rglob("run.json")).read_text(encoding="utf-8")
+    )
+    assert record["verdict"] == VERDICT_FAILED
+    assert record["source_project"]["guard"]["state"] == "unknown"
+    assert "went away" in record["source_project"]["guard"]["error"]
+    # The arm was built and its evidence kept, because the preparation did get that far.
+    assert record["prepared_arm_count"] == 1
+
+
+def test_a_preparation_whose_source_changed_while_it_worked_is_disqualified(
+    project: Path, workspace: Path, tmp_path: Path, stub_engine: Path, monkeypatch
+) -> None:
+    from rag_experiments.report import record as record_module
+
+    spec = _spec_file(
+        tmp_path,
+        project,
+        arms=[{"name": "baseline", "kind": "settings", "overlay": {}}],
+        harness={"modes": ["bm25"]},
+    )
+    real = record_module.snapshot
+    before = real(project)
+    seen = {"calls": 0}
+
+    def _moving(root: Path):
+        seen["calls"] += 1
+        if seen["calls"] == 1:
+            return before
+        moved = real(root)
+        return Snapshot(
+            root=moved.root,
+            entries={**moved.entries, "sources/a-book.pdf": ("file", 1, "0" * 64)},
+            volatile=moved.volatile,
+            relocated_root=moved.relocated_root,
+            registry_path=moved.registry_path,
+            registry_digest=moved.registry_digest,
+            unreadable=moved.unreadable,
+            taken_at=moved.taken_at,
+            elapsed_seconds=moved.elapsed_seconds,
+        )
+
+    monkeypatch.setattr(record_module, "snapshot", _moving)
+    outcome = prepare_experiment(
+        load_spec(spec),
+        app_source=locate_engine(stub_engine),
+        workspace=workspace,
+        runs_directory=tmp_path / "runs",
+    )
+    assert outcome.verdict == VERDICT_SOURCE_CHANGED
+    assert outcome.guard_state == "changed"
+    assert outcome.prepared is False
+    assert outcome.verified is False
+    assert outcome.record["prepared_arm_count"] == 1
+
+
+def test_a_preparation_runs_no_command_and_no_search(
+    project: Path, workspace: Path, tmp_path: Path, stub_engine: Path
+) -> None:
+    spec = _spec_file(
+        tmp_path,
+        project,
+        arms=[
+            {
+                "name": "baseline",
+                "kind": "settings",
+                "overlay": {},
+                "prepare": [["sh", "-c", "touch {sandbox}/ran-the-command"]],
+            }
+        ],
+        harness={"modes": ["bm25"]},
+    )
+    outcome = prepare_experiment(
+        load_spec(spec),
+        app_source=locate_engine(stub_engine),
+        workspace=workspace,
+        runs_directory=tmp_path / "runs",
+    )
+    assert outcome.verdict == VERDICT_PREPARED
+    assert outcome.kind == "preparation"
+    assert outcome.record["arms"][0]["prepare"] == []
+    sandbox = Path(outcome.record["arms"][0]["sandbox"]["workspace"])
+    assert not (sandbox / "ran-the-command").exists()
+    # The preparation still copied the corpus and resolved the settings, which is
+    # what it exists to prove.
+    assert Path(outcome.record["arms"][0]["settings"]["written_to"]).is_file()
 
 
 def test_an_arm_that_refuses_still_leaves_a_record(

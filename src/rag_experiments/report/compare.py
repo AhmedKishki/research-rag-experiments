@@ -513,6 +513,8 @@ def _difference(was: Any, now: Any) -> Any:
 def _verdict_line(record: dict[str, Any], verdict: str) -> str:
     source = (record.get("source_project") or {}).get("guard") or {}
     before = source.get("before") or {}
+    if verdict == "prepared":
+        return f"PREPARATION ONLY: no measurements; source guard {source.get('state', 'unknown')}"
     if verdict == "verified" and source.get("state") == "unknown":
         return "NOT A VERIFIED MEASUREMENT: source integrity could not be checked"
     if verdict == "verified":

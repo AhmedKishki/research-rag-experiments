@@ -47,6 +47,11 @@ VERDICT_INCOMPLETE = "incomplete"
 VERDICT_INTERRUPTED = "interrupted"
 VERDICT_FAILED = "failed"
 VERDICT_NO_ARMS = "no_arm_measured"
+#: A run that resolved every arm and measured nothing. It is a distinct state
+#: rather than a flavour of `verified` because it carries no quality claim at all: no
+#: search ran, so nothing was measured, and a reader must not read a preparation as a
+#: measurement that found nothing.
+VERDICT_PREPARED = "prepared"
 
 #: Every verdict this module can write, so a reader can refuse one it does not
 #: know rather than treat it as verified.
@@ -58,7 +63,13 @@ VERDICTS = (
     VERDICT_INTERRUPTED,
     VERDICT_FAILED,
     VERDICT_NO_ARMS,
+    VERDICT_PREPARED,
 )
+
+#: What a run did. A preparation run searches nothing, so its verdict is chosen from
+#: a different rule and never from the measurement ones.
+KIND_MEASUREMENT = "measurement"
+KIND_PREPARATION = "preparation"
 
 #: What the guard could say about the source project.
 GUARD_UNCHANGED = "unchanged"
@@ -155,13 +166,20 @@ def decide_verdict(
     error: str | None,
     interrupted: bool,
     measured_arms: int,
+    kind: str = KIND_MEASUREMENT,
+    prepared_arms: int = 0,
 ) -> str:
     """The one field a reader checks before believing a number.
 
     The order is the argument: a corpus that moved says more than anything else,
-    then a corpus that could not be checked at all, then an engine that moved
-    under the run, then the arms. A run is `verified` only when every one of those
-    says it may be.
+    then a corpus that could not be checked at all, then an engine that moved under
+    the run, then the arms. A run is `verified` only when every one of those says it
+    may be.
+
+    A preparation run searches nothing, so it has no measurement to verify. Its own
+    success is `prepared`: every arm was built and the corpus was not written to. An
+    arm that refused, or a run that was interrupted, is a failure of the preparation
+    and never a preparation that found nothing.
     """
 
     if guard.state == GUARD_CHANGED:
@@ -176,6 +194,10 @@ def decide_verdict(
         return VERDICT_FAILED
     if interrupted:
         return VERDICT_INTERRUPTED
+    if kind == KIND_PREPARATION:
+        if error is not None or prepared_arms != len(arms):
+            return VERDICT_FAILED
+        return VERDICT_PREPARED
     if not measured_arms:
         return VERDICT_FAILED if error is not None else VERDICT_NO_ARMS
     if error is not None or measured_arms != len(arms):
@@ -195,10 +217,12 @@ def write_record(
     arms: list[dict[str, Any]],
     guard: SourceGuard,
     started: str,
+    kind: str = KIND_MEASUREMENT,
     verdict: str | None = None,
     error: str | None = None,
     interruption: str | None = None,
     measured_arms: int | None = None,
+    prepared_arms: int | None = None,
 ) -> Path:
     """Assemble the record, write it, and return where it went.
 
@@ -214,6 +238,11 @@ def write_record(
         if measured_arms is None
         else measured_arms
     )
+    prepared = (
+        len([arm for arm in arms if arm.get("prepared")])
+        if prepared_arms is None
+        else prepared_arms
+    )
     if verdict is None:
         verdict = decide_verdict(
             guard=guard,
@@ -222,6 +251,8 @@ def write_record(
             error=error,
             interrupted=interruption is not None,
             measured_arms=counted,
+            kind=kind,
+            prepared_arms=prepared,
         )
     payload: dict[str, Any] = {
         "schema_version": RECORD_SCHEMA_VERSION,
@@ -229,6 +260,9 @@ def write_record(
         "verdict": verdict,
         "run": {
             "name": name,
+            # What this run did. `preparation` searched nothing and claims only that
+            # every arm could be built; `measurement` searched and carries numbers.
+            "kind": kind,
             "started_at": started,
             "finished_at": now(),
             "elapsed_seconds": round(elapsed_seconds, 3),
@@ -238,6 +272,7 @@ def write_record(
         "error": error,
         "interruption": interruption,
         "measured_arm_count": counted,
+        "prepared_arm_count": prepared,
         "specification": spec,
         "engine": engine,
         "judgments": judgments,
@@ -275,6 +310,8 @@ __all__ = [
     "GUARD_CHANGED",
     "GUARD_UNCHANGED",
     "GUARD_UNKNOWN",
+    "KIND_MEASUREMENT",
+    "KIND_PREPARATION",
     "RECORD_NAME",
     "RECORD_SCHEMA_VERSION",
     "VERDICTS",
@@ -283,6 +320,7 @@ __all__ = [
     "VERDICT_INCOMPLETE",
     "VERDICT_INTERRUPTED",
     "VERDICT_NO_ARMS",
+    "VERDICT_PREPARED",
     "VERDICT_SOURCE_CHANGED",
     "VERDICT_VERIFIED",
     "SourceGuard",
