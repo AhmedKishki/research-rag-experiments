@@ -2,14 +2,19 @@
   "schema_version": 1,
   "name": "retrieval-depth-sweep",
   "source_project": "/home/ahmed/Documents/projects/ai-and-fetishism",
-  "judgments": "../../ultra-rag-mcp-servers/research-rag/evaluation/ai-and-fetishism-queries.json",
+  "judgments": "/home/ahmed/Documents/ultra-rag-mcp-servers/research-rag/evaluation/ai-and-fetishism-queries.json",
   "generations": [],
   "harness": {
     "top_k": 10,
     "deep_top_k": 0,
-    "modes": ["hybrid", "hybrid+rerank"],
+    "modes": [
+      "hybrid",
+      "hybrid+rerank"
+    ],
     "offline": true,
-    "skip_targets": ["t12"]
+    "skip_targets": [
+      "t12"
+    ]
   },
   "arms": [
     {
@@ -18,21 +23,11 @@
       "overlay": {}
     },
     {
-      "name": "candidates-80",
+      "name": "wider-candidates",
       "kind": "settings",
       "overlay": {
-        "retrieval.minimum_candidates": 40,
-        "retrieval.maximum_candidates": 80
-      }
-    },
-    {
-      "name": "candidates-80-rerank-120",
-      "kind": "settings",
-      "overlay": {
-        "retrieval.minimum_candidates": 40,
-        "retrieval.maximum_candidates": 80,
-        "retrieval.rerank_max_candidates": 120,
-        "retrieval.rerank_window_multiple": 4
+        "retrieval.minimum_candidates": 80,
+        "retrieval.maximum_candidates": 160
       }
     }
   ]

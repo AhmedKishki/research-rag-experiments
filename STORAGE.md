@@ -24,7 +24,7 @@ is large; a run holds generated reports. Regenerate one instead of editing it.
   xdg/              an empty configuration home for the children a run spawns
   <arm>/            only for a run: the arm's own directory
     arm.log         every line this harness emitted for the arm
-    report.json     the report the app's own harness wrote
+    report-<split>.json  the report the app's own harness wrote, per judged split
     engine/         only for a code arm: the disposable checkout
 ```
 
@@ -125,7 +125,7 @@ with its provenance is more useful than no failure at all.
 | `run` | object | `name`, `started_at`, `finished_at`, `elapsed_seconds`, `directory`. |
 | `specification` | object | The specification as read: path, name, source project, judged set, generations, harness, arm count. |
 | `engine` | object | The tree under test: `root`, `revision`, `branch`, `dirty`, `untracked_file_count`, `harness`, `version`. |
-| `judgments` | object | `path`, `sha256`, `byte_count`. |
+| `judgments` | list of object | One entry per judged split: `name`, `path`, `sha256`, `byte_count`. |
 | `source_project` | object | `project_root`, `pointed_generation`, and `guard`. |
 | `arms` | list of object | One entry per arm, in the order the specification listed them. |
 | `source_project.guard` | object | `guarded_entries`, `before`, `after`, `unchanged`, `differences`. |
@@ -137,8 +137,9 @@ with its provenance is more useful than no failure at all.
 | `arms[].settings` | object | `key_count`, `document_sha256`, `overridden`, `layers`, `values`, `written_to`, `config_home`. |
 | `arms[].settings.layers` | object | Which layer each baseline value came from, keyed by setting name. |
 | `arms[].prepare` | list of object | One entry per preparation command: `command`, `exit_code`, `elapsed_seconds`, `stdout`, `stderr`. |
-| `arms[].measure` | object | The measurement command's `command`, `exit_code`, `elapsed_seconds`, `stdout`, `stderr`, `log`. |
-| `arms[].report` | string | Where the report was written. |
+| `arms[].validate` | list of object | One entry per split's validation pass: `stage`, `split`, `command`, `exit_code`, `elapsed_seconds`, `stdout`, `stderr`. |
+| `arms[].measure` | list of object | One entry per split's measurement: the same fields as a validation entry, plus `report`. |
+| `arms[].reports` | object | Each split's report path, keyed by split name. |
 | `arms[].log` | string | Where the arm's log was written. |
 
 `layers` is a map from a setting's dotted name to the layer that supplied its
@@ -189,3 +190,31 @@ value domain is the app's own setting kinds, so each value is a basic string,
 integer, float, or boolean. `tests/test_engine.py` reads a written file back
 through the app's own layer machinery rather than parsing it here, so a document
 this repository could write and the app could not read would fail a test.
+
+## Judged splits
+
+A specification's `judgments` is either one path, read under the split name `all`,
+or a list of `{"name", "path"}`. Each split is validated and then measured with the
+same arms, and each writes `report-<split>.json` beside the arm's log. A split name
+is a record key and a printed label, so it is not trusted to be a safe file name:
+anything outside a plain word becomes a hyphen, and the record keeps the name the
+specification wrote.
+
+Two splits in one run exist because a development number and a held-out number are
+only comparable when the same arms produced both. Two specifications listing the
+same arms can drift apart between two runs, and the drift is invisible in the
+numbers.
+
+## The validation pass
+
+Before any search, each arm asks the app's harness to resolve every judged target
+in every split. A target that does not resolve uniquely would make every number
+for that split meaningless, so the run stops there rather than after an hour of
+inference. The pass runs through the app's own `--validate-only` flag, so the
+resolution rule is the app's and not a second copy of it.
+
+The outcome of every pass is in the record under `arms[].validate` and is printed
+per arm and per split, so a target that fails to resolve is named rather than
+summarised away. The app's harness stops at the first unresolved target, so a set
+with several unresolvable targets reports the first and the rest are found on the
+next run; collecting them all at once is a change to the app's harness.

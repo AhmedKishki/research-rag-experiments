@@ -75,6 +75,13 @@ ARM_FIELDS = frozenset({"name", "kind", "overlay", "base", "patch", "prepare"})
 #: command instead of quietly measuring the wrong path.
 PREPARE_TOKENS = ("{project}", "{source}", "{tree}", "{sandbox}")
 
+#: The split name a specification that names one judged path is given. It is named
+#: rather than left blank so a record and a table always have a key to print.
+SINGLE_SPLIT = "all"
+
+#: The keys one split of the `judgments` list may carry.
+JUDGMENT_FIELDS = frozenset({"name", "path"})
+
 
 @dataclass(frozen=True, slots=True)
 class Arm:
@@ -99,13 +106,31 @@ class Arm:
 
 
 @dataclass(frozen=True, slots=True)
+class JudgedSet:
+    """One judged query set, and the split it belongs to.
+
+    The name is what the record and the table use, so "held-out" reads as
+    held-out rather than as a file path. Two splits measured in one run is the
+    point: a development number and a held-out number are only comparable when
+    the same arms produced both, and two specifications listing the same arms can
+    drift apart between the two runs.
+    """
+
+    name: str
+    path: Path
+
+    def describe(self) -> dict[str, Any]:
+        return {"name": self.name, "path": str(self.path)}
+
+
+@dataclass(frozen=True, slots=True)
 class RunSpec:
     """A whole run: what is measured, where the corpus comes from, and the arms."""
 
     path: Path
     name: str
     source_project: Path
-    judgments: Path
+    judgments: tuple[JudgedSet, ...]
     generations: tuple[str, ...]
     harness: dict[str, Any]
     arms: tuple[Arm, ...]
@@ -115,7 +140,7 @@ class RunSpec:
             "path": str(self.path),
             "name": self.name,
             "source_project": str(self.source_project),
-            "judgments": str(self.judgments),
+            "judgments": [item.describe() for item in self.judgments],
             "generations": list(self.generations),
             "harness": self.harness,
             "arm_count": len(self.arms),
@@ -149,10 +174,7 @@ def load_spec(path: Path) -> RunSpec:
 
     base = location.parent
     source_project = _path(document, "source_project", base, location)
-    judgments = _path(document, "judgments", base, location)
-    if not judgments.is_file():
-        raise ExperimentError(f"The judged set does not exist: {judgments}")
-
+    judgments = _judged_sets(document.get("judgments"), base, location)
     arms_document = document.get("arms")
     if not isinstance(arms_document, list) or not arms_document:
         raise ExperimentError(f"{location} names no arms")
@@ -173,6 +195,52 @@ def load_spec(path: Path) -> RunSpec:
         harness=_harness(document.get("harness"), location),
         arms=arms,
     )
+
+
+def _judged_sets(entry: Any, base: Path, location: Path) -> tuple[JudgedSet, ...]:
+    """Read the `judgments` field, which is one path or a list of named splits.
+
+    A bare string is one split called `all`, which is what a specification with
+    one judged set means. A list is `{"name", "path"}` per split, and the names
+    have to differ because the record and the table key on them: two splits
+    sharing a name would make a held-out row indistinguishable from a development
+    one, which is the mistake the split exists to prevent.
+    """
+
+    if isinstance(entry, str) and entry.strip():
+        path = _absolute(entry, base)
+        if not path.is_file():
+            raise ExperimentError(f"The judged set does not exist: {path}")
+        return (JudgedSet(name=SINGLE_SPLIT, path=path),)
+    if not isinstance(entry, list) or not entry:
+        raise ExperimentError(
+            f"{location} has no `judgments`. Name one path, or a list of "
+            '{"name", "path"} splits such as development and held-out.'
+        )
+    if not all(isinstance(item, dict) for item in entry):
+        raise ExperimentError(
+            f"{location} lists a judged set that is not an object; each split is "
+            '{"name", "path"}'
+        )
+    judged: list[JudgedSet] = []
+    for position, item in enumerate(entry, 1):
+        _refuse_unknown(item, JUDGMENT_FIELDS, f"{location} judged set {position}")
+        name = str(item.get("name") or "").strip()
+        if not name:
+            raise ExperimentError(f"{location} judged set {position} has no name")
+        raw = item.get("path")
+        if not isinstance(raw, str) or not raw.strip():
+            raise ExperimentError(f"{location} judged set {name!r} has no path")
+        path = _absolute(raw, base)
+        if not path.is_file():
+            raise ExperimentError(f"The judged set does not exist: {path}")
+        judged.append(JudgedSet(name=name, path=path))
+    duplicates = sorted(
+        {item.name for item in judged if [j.name for j in judged].count(item.name) > 1}
+    )
+    if duplicates:
+        raise ExperimentError(f"{location} names a judged split twice: {duplicates}")
+    return tuple(judged)
 
 
 def _arm(entry: Any, base: Path, location: Path, position: int) -> Arm:
@@ -266,10 +334,13 @@ def _absolute(value: Any, base: Path) -> Path:
 __all__ = [
     "ARM_KINDS",
     "CODE_ARM",
+    "HARNESS_FIELDS",
     "PREPARE_TOKENS",
     "SETTINGS_ARM",
+    "SINGLE_SPLIT",
     "SPEC_SCHEMA_VERSION",
     "Arm",
+    "JudgedSet",
     "RunSpec",
     "load_spec",
 ]

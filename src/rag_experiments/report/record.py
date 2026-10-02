@@ -85,7 +85,7 @@ def write_record(
     elapsed_seconds: float,
     spec: dict[str, Any],
     engine: dict[str, Any],
-    judgments: dict[str, Any],
+    judgments: list[dict[str, Any]],
     source: dict[str, Any],
     arms: list[dict[str, Any]],
     guard: SourceGuard,

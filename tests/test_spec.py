@@ -23,6 +23,12 @@ from rag_experiments.experiment.spec import (
 SETTINGS = {"name": "baseline", "kind": "settings", "overlay": {}}
 
 
+def _write(path: Path) -> None:
+    """Write a judged set shaped like one, so only the split logic is exercised."""
+
+    path.write_text(json.dumps({"schema_version": 1, "queries": []}), encoding="utf-8")
+
+
 def test_a_complete_specification_reads(make_spec) -> None:
     spec = load_spec(
         make_spec(
@@ -47,8 +53,82 @@ def test_a_relative_judged_set_resolves_against_the_specification(
     make_spec,
 ) -> None:
     spec = load_spec(make_spec([SETTINGS]))
-    assert spec.judgments.is_file()
-    assert spec.judgments.parent == make_spec([SETTINGS]).parent
+    assert len(spec.judgments) == 1
+    assert spec.judgments[0].name == "all"
+    assert spec.judgments[0].path.is_file()
+    assert spec.judgments[0].path.parent == make_spec([SETTINGS]).parent
+
+
+def test_two_named_splits_are_read_for_one_run(make_spec, tmp_path: Path) -> None:
+    # Development and held-out measured together is the point: a held-out number
+    # is only comparable with a development one when the same arms produced both.
+    held_out = tmp_path / "held-out.json"
+    _write(held_out)
+    spec = load_spec(
+        make_spec(
+            [SETTINGS],
+            judgments=[
+                {"name": "development", "path": "judged.json"},
+                {"name": "held-out", "path": held_out.name},
+            ],
+        )
+    )
+    assert [item.name for item in spec.judgments] == ["development", "held-out"]
+    assert all(item.path.is_file() for item in spec.judgments)
+
+
+def test_two_splits_of_one_name_are_refused(make_spec) -> None:
+    with pytest.raises(ExperimentError) as caught:
+        load_spec(
+            make_spec(
+                [SETTINGS],
+                judgments=[
+                    {"name": "queries", "path": "judged.json"},
+                    {"name": "queries", "path": "judged.json"},
+                ],
+            )
+        )
+    assert "twice" in str(caught.value)
+
+
+def test_a_split_with_no_name_is_refused(make_spec) -> None:
+    with pytest.raises(ExperimentError) as caught:
+        load_spec(make_spec([SETTINGS], judgments=[{"path": "judged.json"}]))
+    assert "has no name" in str(caught.value)
+
+
+def test_a_split_with_an_unknown_key_is_refused(make_spec) -> None:
+    with pytest.raises(ExperimentError) as caught:
+        load_spec(
+            make_spec(
+                [SETTINGS],
+                judgments=[{"name": "d", "path": "judged.json", "weight": 1}],
+            )
+        )
+    assert "weight" in str(caught.value)
+
+
+def test_a_split_that_is_not_an_object_is_refused(make_spec) -> None:
+    with pytest.raises(ExperimentError) as caught:
+        load_spec(make_spec([SETTINGS], judgments=["judged.json", "held-out.json"]))
+    assert "not an object" in str(caught.value)
+
+
+def test_an_absent_judged_set_is_refused(make_spec) -> None:
+    with pytest.raises(ExperimentError) as caught:
+        load_spec(
+            make_spec([SETTINGS], judgments=[{"name": "d", "path": "absent.json"}])
+        )
+    assert "does not exist" in str(caught.value)
+
+
+def test_the_specification_states_its_splits_in_its_record_form(
+    make_spec,
+) -> None:
+    described = load_spec(make_spec([SETTINGS])).describe()
+    assert described["judgments"] == [
+        {"name": "all", "path": described["judgments"][0]["path"]}
+    ]
 
 
 def test_a_specification_that_is_not_json_is_refused(tmp_path: Path) -> None:
@@ -110,7 +190,7 @@ def test_the_harness_keys_are_built_from_the_ones_the_executor_obeys() -> None:
     )
 
 
-def test_a_missing_judged_set_is_refused(make_spec, tmp_path: Path) -> None:
+def test_a_missing_judged_set_is_refused(make_spec) -> None:
     spec_path = make_spec([SETTINGS])
     document = json.loads(spec_path.read_text(encoding="utf-8"))
     document["judgments"] = "absent.json"

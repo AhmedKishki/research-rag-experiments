@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "name": "candidate-window-ablation",
+  "source_project": "/home/ahmed/Documents/projects/ai-and-fetishism",
+  "judgments": [
+    {
+      "name": "development",
+      "path": "/tmp/kilo/splits/development-queries.json"
+    },
+    {
+      "name": "held-out",
+      "path": "/tmp/kilo/splits/held-out-queries.json"
+    }
+  ],
+  "generations": [],
+  "harness": {
+    "top_k": 10,
+    "deep_top_k": 0,
+    "modes": [
+      "hybrid+rerank"
+    ],
+    "offline": true,
+    "skip_targets": [
+      "t12"
+    ]
+  },
+  "arms": [
+    {
+      "name": "depth-40-rrank-20",
+      "kind": "settings",
+      "overlay": {
+        "retrieval.minimum_candidates": 20,
+        "retrieval.maximum_candidates": 40,
+        "retrieval.rerank_max_candidates": 20
+      }
+    },
+    {
+      "name": "depth-80-rrank-20",
+      "kind": "settings",
+      "overlay": {
+        "retrieval.minimum_candidates": 40,
+        "retrieval.maximum_candidates": 80,
+        "retrieval.rerank_max_candidates": 20
+      }
+    },
+    {
+      "name": "depth-160-rrank-20",
+      "kind": "settings",
+      "overlay": {
+        "retrieval.minimum_candidates": 80,
+        "retrieval.maximum_candidates": 160,
+        "retrieval.rerank_max_candidates": 20
+      }
+    }
+  ]
+}

@@ -22,10 +22,11 @@ from rag_experiments.experiment.execute import (
     HARNESS_SETTINGS,
     _harness_flag,
     _interpolate,
+    _segment,
     effective_overlay,
     prepare_arm,
 )
-from rag_experiments.experiment.spec import Arm, RunSpec
+from rag_experiments.experiment.spec import Arm, JudgedSet, RunSpec
 
 
 def _spec(**overrides: object) -> RunSpec:
@@ -250,3 +251,91 @@ def test_a_run_record_is_json_serialisable_whole(
     assert json.loads(json.dumps(prepared.describe()))["sandbox"]["name"] == (
         "fixture-baseline"
     )
+
+
+def _two_split_spec(project: Path, tmp_path: Path) -> RunSpec:
+    for name in ("development.json", "held-out.json"):
+        (tmp_path / name).write_text(
+            json.dumps({"schema_version": 1, "queries": []}), encoding="utf-8"
+        )
+    return _spec(
+        name="fixture",
+        source_project=project,
+        judgments=(
+            JudgedSet(name="development", path=tmp_path / "development.json"),
+            JudgedSet(name="held-out", path=tmp_path / "held-out.json"),
+        ),
+        arms=(_arm(),),
+    )
+
+
+def test_the_measurement_command_carries_the_split_the_app_harness_expects(
+    app_source: Path, project: Path, tmp_path: Path
+) -> None:
+    from rag_experiments.experiment.execute import _measure_command
+
+    spec = _two_split_spec(project, tmp_path)
+    engine = locate_engine(app_source)
+    sandbox = _StubSandbox(tmp_path)  # type: ignore[arg-type]
+    command = _measure_command(
+        spec,
+        engine,
+        sandbox,  # type: ignore[arg-type]
+        spec.judgments[1],
+        tmp_path / "report.json",
+        stage="measure",
+    )
+    assert str(spec.judgments[1].path) in command
+    assert str(spec.judgments[0].path) not in command
+    assert "--validate-only" not in command
+
+
+def test_the_validation_command_carries_the_apps_own_flag(
+    app_source: Path, project: Path, tmp_path: Path
+) -> None:
+    from rag_experiments.experiment.execute import VALIDATE_FLAG, _measure_command
+
+    spec = _two_split_spec(project, tmp_path)
+    command = _measure_command(
+        spec,
+        locate_engine(app_source),
+        _StubSandbox(tmp_path),  # type: ignore[arg-type]
+        spec.judgments[0],
+        tmp_path / "report.json",
+        stage="validate",
+    )
+    assert command[-1] == VALIDATE_FLAG
+
+
+def test_each_split_gets_its_own_report_file(app_source: Path, tmp_path: Path) -> None:
+    from rag_experiments.experiment.execute import REPORT_PATTERN
+
+    assert REPORT_PATTERN.format(split="held-out") == "report-held-out.json"
+    # A split name is a record key and a printed label, so it is not trusted to be
+    # a safe file name.
+    assert REPORT_PATTERN.format(split=_segment("held out/query")) == (
+        "report-held-out-query.json"
+    )
+
+
+def test_a_split_name_that_is_not_a_path_stays_one_segment() -> None:
+    from rag_experiments.experiment.execute import _segment
+
+    assert _segment("../../etc/passwd") == "etc-passwd"
+    assert _segment("///") == "split"
+
+
+def test_a_measured_arm_reports_one_entry_per_split(
+    project: Path, workspace: Path, app_source: Path, tmp_path: Path
+) -> None:
+    prepared = prepare_arm(
+        _two_split_spec(project, tmp_path),
+        _arm(),
+        workspace=workspace,
+        run_directory=tmp_path,
+        app_source=locate_engine(app_source),
+    )
+    # Preparation is split-agnostic: one sandbox, one pinned file, one engine, and
+    # the splits differ only in which judged set each measurement is handed.
+    assert prepared.sandbox.generation_ids == (FIRST_GENERATION,)
+    assert prepared.settings["key_count"] > 30

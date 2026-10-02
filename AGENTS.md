@@ -32,6 +32,21 @@ The engineering guide for AI agents working in `rag-experiments`.
   - Settings come from the app's own registry, resolved by the app's own layer
     stack, inside the tree under test.
   - A name this repository spells out itself is a second copy that will drift.
+- An experiment runs only what its specification names, and nothing is measured
+  before it can be resolved.
+  - Every arm asks the app's harness to resolve every judged target first, once
+    per split, through the app's own validation flag. A target that does not
+    resolve uniquely makes every number for that split meaningless.
+  - A validation failure stops the run before inference, not after, and names the
+    target and the log.
+- A number may only be compared against a number measured the same way.
+  - A development split and a held-out split are measured in one run by the same
+    arms, because two specifications listing the same arms can drift apart.
+  - Each block states every arm's candidate window and rerank budget, read from
+    that arm's pinned settings, and says when they differ. The statement is a
+    fact about the confound; whether varying the budget was the point is the
+    reader's judgement and this repository does not make it.
+  - Latency is reported as both p50 and p95, each a value that was measured.
 - A measurement is reproducible or it is not a measurement.
   - Every setting the engine declares is pinned into the sandbox, so the account
     overlay, a `RESEARCH_RAG_` variable, and a later packaged default cannot move
@@ -51,7 +66,7 @@ Each fact has one home. Every other file points at it.
 | `README.md` | the user manual: what it does, how to run it, what it cannot do |
 | `STORAGE.md` | the on-disk format: the workspace, the sandbox, the run record |
 | `AGENTS.md` | this file: the rules that are not derivable from the code or the tests |
-| `examples/` | one run specification that runs against a project the reader has |
+| `examples/` | two run specifications that run against a project the reader has |
 | A folder's `README.md` | what that folder owns, and what it may never do |
 | A module's docstring | why that module does what it does, and what it may never do |
 
@@ -97,8 +112,8 @@ Each fact has one home. Every other file points at it.
   relocated. Nothing else is rewritten, so a child inherits what the app needs.
 - The corpus a reader's example names is the reader's. This repository holds no
   corpus, no judged query set, and no patch.
-- A failed arm is a refusal, never a row of zeroes. A non-zero exit, a missing
-  report, and an unreadable report are all refusals.
+- A failed arm is a refusal, never a row of zeroes. A non-zero exit, a failed
+  validation, a missing report, and an unreadable report are all refusals.
 - `EXIT_SOURCE_CHANGED` is its own status because it is not a refusal: the arms
   ran and the corpus they claim to have measured is not the one on disk.
 - A run never overwrites a record. A run directory name carries the
@@ -132,3 +147,6 @@ uv run python -m compileall -q src tests
 - A change to the comparison is proved against a report shaped like the app's,
   with a column removed, because a column that silently prints as a dash is the
   failure this code is most able to produce.
+- A change to the split handling is proved by a run with two splits and two arms,
+  and a change to the validation pass by a specification whose judged target does
+  not resolve, which must stop before any search.

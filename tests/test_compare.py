@@ -86,11 +86,12 @@ def test_every_column_reads_a_key_a_row_carries() -> None:
     from rag_experiments.report.compare import _row as build_row
 
     keys = {key for _label, key, _doc in COLUMNS}
-    row = build_row({"arm": {"name": "a", "kind": "settings"}, "report": ""}, MODE)
+    row = build_row(
+        {"arm": {"name": "a", "kind": "settings"}, "report": ""}, MODE, None
+    )
     # A column whose key no row carries is a column that silently prints as a
     # dash, so the row is built from the column table and the two agree exactly.
-    assert set(row) - {"present", "kind"} == keys
-    assert keys - {"arm"} <= {key for _label, key, _doc in COLUMNS if key}
+    assert set(row) - {"present", "kind", "budgets"} == keys
 
 
 def test_a_measured_arm_reads_every_column(tmp_path: Path) -> None:
@@ -200,3 +201,133 @@ def test_an_absent_report_prints_as_dashes_rather_than_failing(tmp_path: Path) -
     }
     table = render_comparison(record)
     assert "No arm of this run reported" in table
+
+
+def _two_split_record(tmp_path: Path) -> dict[str, Any]:
+    """A record with two splits and arms at unequal budgets, as a sweep produces."""
+
+    def arm(
+        name: str, candidates: int, rerank: int, overall: dict[str, Any]
+    ) -> dict[str, Any]:
+        development = _report(tmp_path, f"{name}-d.json", overall, [0.1, 0.2, 0.3, 0.4])
+        held_out = _report(
+            tmp_path, f"{name}-h.json", {**overall, "query_count": 10}, [0.5, 0.6]
+        )
+        return {
+            "arm": {"name": name, "kind": "settings"},
+            "settings": {
+                "values": {
+                    "retrieval.maximum_candidates": candidates,
+                    "retrieval.rerank_max_candidates": rerank,
+                }
+            },
+            "reports": {"development": str(development), "held-out": str(held_out)},
+        }
+
+    return {
+        "verdict": "verified",
+        "source_project": {
+            "guard": {
+                "unchanged": True,
+                "differences": [],
+                "before": {"file_count": 5, "byte_count": 100, "digest": "d" * 64},
+            }
+        },
+        "arms": [
+            arm("baseline", 200, 50, _row()),
+            arm("wider", 320, 50, _row(success_at_1=0.7)),
+        ],
+    }
+
+
+def test_every_split_is_tabulated_because_a_held_out_number_stands_alone(
+    tmp_path: Path,
+) -> None:
+    table = render_comparison(_two_split_record(tmp_path))
+    assert "split: development" in table
+    assert "split: held-out" in table
+    assert table.count("split:") == 2
+
+
+def test_one_split_can_be_tabulated_on_its_own(tmp_path: Path) -> None:
+    table = render_comparison(_two_split_record(tmp_path), split="held-out")
+    assert "split: held-out" in table
+    assert "split: development" not in table
+
+
+def test_the_splits_are_read_from_each_arms_own_reports(tmp_path: Path) -> None:
+    record = _two_split_record(tmp_path)
+    held = rows_for_run(record, MODE, "held-out")
+    assert [row["n"] for row in held] == [10, 10]
+    development = rows_for_run(record, MODE, "development")
+    assert [row["n"] for row in development] == [30, 30]
+
+
+def test_each_arms_budget_is_stated_above_the_table(tmp_path: Path) -> None:
+    table = render_comparison(_two_split_record(tmp_path))
+    assert "budgets (cand, rrank)" in table
+    assert "baseline: cand=200 rrank=50" in table
+    assert "wider: cand=320 rrank=50" in table
+
+
+def test_arms_at_unequal_budgets_state_the_confound(tmp_path: Path) -> None:
+    # A candidate-window sweep varies the window on purpose and a policy ablation
+    # is only comparable at a fixed one, so the table states that a difference is
+    # also a difference in budget rather than calling the run invalid.
+    table = render_comparison(_two_split_record(tmp_path))
+    assert "differs across these arms" in table
+    assert "difference in budget as well as in policy" in table
+
+
+def test_arms_at_equal_budgets_carry_no_warning(tmp_path: Path) -> None:
+    record = _two_split_record(tmp_path)
+    for arm in record["arms"]:
+        arm["settings"]["values"]["retrieval.maximum_candidates"] = 200
+    table = render_comparison(record)
+    assert "differs across these arms" not in table
+    assert "differences from baseline" in table
+
+
+def test_a_budget_the_record_does_not_state_prints_as_a_dash(
+    tmp_path: Path,
+) -> None:
+    record = _two_split_record(tmp_path)
+    for arm in record["arms"]:
+        arm["settings"] = {"values": {}}
+    table = render_comparison(record)
+    assert "cand=- rrank=-" in table
+
+
+def test_both_latency_quantiles_are_reported(tmp_path: Path) -> None:
+    seconds = [float(value) for value in range(1, 21)]
+    record = _record(tmp_path, [("baseline", _row(), seconds)])
+    row = rows_for_run(record, MODE)[0]
+    assert row["p50_seconds"] == 10.0
+    assert row["p95_seconds"] == 19.0
+    table = render_comparison(record)
+    assert "p50 s" in table and "p95 s" in table
+
+
+def test_a_record_written_before_splits_are_read_under_one_name(tmp_path: Path) -> None:
+    # A finished run's record carries one report and must stay readable rather
+    # than being refused because the shape it was written in has since changed.
+    record = {
+        "verdict": "verified",
+        "source_project": {"guard": {"unchanged": True, "differences": []}},
+        "arms": [
+            {
+                "arm": {"name": "baseline", "kind": "settings"},
+                "report": str(_report(tmp_path, "legacy.json", _row(), [0.1, 0.2])),
+            }
+        ],
+    }
+    assert "split: all" in render_comparison(record)
+
+
+def test_the_verdict_leads_a_run_with_no_readable_number(tmp_path: Path) -> None:
+    record = _record(tmp_path, [("baseline", _row(), [])])
+    del record["arms"][0]["report"]
+    record["arms"][0]["reports"] = {}
+    out = render_comparison(record)
+    assert out.startswith("source project unchanged")
+    assert "No arm of this run reported" in out

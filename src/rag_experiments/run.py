@@ -52,6 +52,7 @@ def run_experiment(
     workspace: Path,
     runs_directory: Path,
     keep_sandboxes: bool = True,
+    validate_first: bool = True,
 ) -> RunOutcome:
     """Measure every arm of a specification and write one record for the run."""
 
@@ -83,6 +84,7 @@ def run_experiment(
             run_directory=run_directory,
             app_source=app_source,
             keep_sandbox=keep_sandboxes,
+            validate_first=validate_first,
         )
         results.append(result)
 
@@ -112,18 +114,24 @@ def run_experiment(
     )
 
 
-def _judgments(spec: RunSpec) -> dict[str, Any]:
-    """The judged set as the record states it: where it was and what it held.
+def _judgments(spec: RunSpec) -> list[dict[str, Any]]:
+    """Each judged split as the record states it: where it was and what it held.
 
     The digest is over the bytes, so a run against a judged set that was edited
-    afterwards is distinguishable from one against the same set as it was.
+    afterwards is distinguishable from one against the same set as it was. Two
+    splits measured in one run are listed together, because a development number
+    and a held-out number are only comparable when the same arms produced both.
     """
 
-    return {
-        "path": str(spec.judgments),
-        "sha256": _digest(spec.judgments),
-        "byte_count": spec.judgments.stat().st_size,
-    }
+    return [
+        {
+            "name": split.name,
+            "path": str(split.path),
+            "sha256": _digest(split.path),
+            "byte_count": split.path.stat().st_size,
+        }
+        for split in spec.judgments
+    ]
 
 
 def _pointed_generation(spec: RunSpec) -> str | None:

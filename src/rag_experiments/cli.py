@@ -144,6 +144,15 @@ def _parser() -> argparse.ArgumentParser:
         help="Delete each sandbox once its arm has been measured.",
     )
     run.add_argument(
+        "--no-validate",
+        action="store_true",
+        help=(
+            "Measure without the app's validation pass first. A judged target "
+            "that cannot be resolved then costs an hour of inference before it "
+            "is found."
+        ),
+    )
+    run.add_argument(
         "--dry-run",
         action="store_true",
         help=(
@@ -159,6 +168,10 @@ def _parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         help="A mode to tabulate. Repeatable. Default: every mode the run reported.",
+    )
+    show.add_argument(
+        "--split",
+        help="One judged split to tabulate. Default: every split the run reported.",
     )
     show.add_argument("--json", action="store_true", help="Print the record instead.")
     return parser
@@ -331,11 +344,13 @@ def _run(args: argparse.Namespace) -> int:
         workspace=args.workspace,
         runs_directory=args.runs,
         keep_sandboxes=not args.no_keep_sandboxes,
+        validate_first=not args.no_validate,
     )
     print(outcome.comparison)
     print()
     print(f"record: {outcome.record_path}")
     print(f"verdict: {outcome.verdict}")
+    _report_validation(outcome)
     if outcome.verdict == VERDICT_SOURCE_CHANGED:
         guard = outcome.record["source_project"]["guard"]
         print(
@@ -346,6 +361,28 @@ def _run(args: argparse.Namespace) -> int:
         )
         return EXIT_SOURCE_CHANGED
     return EXIT_VERIFIED
+
+
+def _report_validation(outcome: Any) -> None:
+    """Say whether every judged target resolved, per arm and per split.
+
+    The plan asks for every target-resolution failure to be logged rather than
+    summarised away, so an arm that resolved everything says so and an arm that
+    did not is named with the log that holds the message.
+    """
+
+    for result in outcome.results:
+        for item in result.validate:
+            if item.exit_code == 0:
+                print(
+                    f"validate {result.arm.name} / {item.split}: "
+                    f"every judged target resolved"
+                )
+            else:
+                print(
+                    f"validate {result.arm.name} / {item.split}: exit "
+                    f"{item.exit_code}; see {result.log_path}"
+                )
 
 
 def _dry_run(spec: Any, engine: EngineSource, args: argparse.Namespace) -> int:
@@ -393,7 +430,7 @@ def _compare(args: argparse.Namespace) -> int:
     if args.json:
         print(json.dumps(record, indent=2, ensure_ascii=False))
         return EXIT_VERIFIED
-    print(compare.render_comparison(record, tuple(args.mode)))
+    print(compare.render_comparison(record, tuple(args.mode), args.split))
     verdict = str(record.get("verdict") or "")
     if verdict == VERDICT_SOURCE_CHANGED:
         return EXIT_SOURCE_CHANGED

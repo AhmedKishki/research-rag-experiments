@@ -17,6 +17,7 @@ import json
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -32,6 +33,7 @@ from .spec import (
     HARNESS_REPEATED,
     HARNESS_SETTINGS,
     Arm,
+    JudgedSet,
     RunSpec,
 )
 
@@ -47,6 +49,39 @@ MEASURE_TIMEOUT_SECONDS = 4 * 60 * 60
 JUDGMENTS_FLAG = "--judgments"
 REPORT_FLAG = "--report"
 PROJECT_FLAG = "--project"
+VALIDATE_FLAG = "--validate-only"
+
+#: How far a split's report sits from the arm's directory. A split name is a path
+#: segment, so this is the only place a name is turned into a file name.
+REPORT_PATTERN = "report-{split}.json"
+
+
+@dataclass(frozen=True, slots=True)
+class Measurement:
+    """One harness invocation: a stage, a split, a command, and what it returned."""
+
+    stage: str
+    split: str
+    command: list[str]
+    exit_code: int
+    elapsed_seconds: float
+    stdout: str
+    stderr: str
+    report: Path | None = None
+
+    def describe(self) -> dict[str, Any]:
+        record = {
+            "stage": self.stage,
+            "split": self.split,
+            "command": list(self.command),
+            "exit_code": self.exit_code,
+            "elapsed_seconds": round(self.elapsed_seconds, 3),
+            "stdout": self.stdout,
+            "stderr": self.stderr,
+        }
+        if self.report is not None:
+            record["report"] = str(self.report)
+        return record
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,9 +94,16 @@ class ArmResult:
     sandbox: Sandbox
     settings: dict[str, Any]
     prepare: list[dict[str, Any]]
-    measure: dict[str, Any]
-    report_path: Path
+    validate: tuple[Measurement, ...]
+    measure: tuple[Measurement, ...]
     log_path: Path
+
+    def reports(self) -> dict[str, Path]:
+        """Where each split's report was written, keyed by split name."""
+
+        return {
+            item.split: item.report for item in self.measure if item.report is not None
+        }
 
     def describe(self) -> dict[str, Any]:
         return {
@@ -71,8 +113,9 @@ class ArmResult:
             "sandbox": self.sandbox.describe(),
             "settings": self.settings,
             "prepare": self.prepare,
-            "measure": self.measure,
-            "report": str(self.report_path),
+            "validate": [item.describe() for item in self.validate],
+            "measure": [item.describe() for item in self.measure],
+            "reports": {name: str(path) for name, path in self.reports().items()},
             "log": str(self.log_path),
         }
 
@@ -185,8 +228,14 @@ def run_arm(
     run_directory: Path,
     app_source: EngineSource,
     keep_sandbox: bool = True,
+    validate_first: bool = True,
 ) -> ArmResult:
-    """Prepare one arm, optionally prepare the corpus, measure it, and report."""
+    """Prepare one arm, optionally prepare the corpus, measure it, and report.
+
+    `validate_first` runs the app's harness in its validation stage before any
+    search, so a judged target that cannot be resolved stops the run before it
+    costs an hour of inference rather than after.
+    """
 
     prepared = prepare_arm(
         spec,
@@ -198,7 +247,6 @@ def run_arm(
     sandbox = prepared.sandbox
     engine = prepared.engine
     log_path = prepared.log_path
-    report_path = prepared.report_path
     output: list[str] = log_path.read_text(encoding="utf-8").splitlines()
 
     def emit(line: str) -> None:
@@ -222,29 +270,65 @@ def run_arm(
         if outcome["exit_code"] != 0:
             _fail(arm, log_path, "prepare", outcome)
 
-    command = _measure_command(spec, engine, sandbox, report_path)
-    emit(f"measure: {command}")
-    outcome = _run(
-        command, environment, cwd=sandbox.root, timeout=MEASURE_TIMEOUT_SECONDS
-    )
-    outcome["command"] = command
-    outcome["log"] = _tail(outcome["stdout"])
-    measure = outcome
-    emit(f"measure exit {outcome['exit_code']} in {outcome['elapsed_seconds']:.1f} s")
-    if outcome["exit_code"] != 0:
-        _fail(arm, log_path, "measure", outcome)
-    if not report_path.is_file():
-        raise ExperimentError(
-            f"Arm {arm.name!r} exited cleanly and wrote no report to {report_path}. "
-            f"The full output is in {log_path}."
+    # The app's own harness resolves a judged target before it searches, and a
+    # target it cannot resolve uniquely makes every number for that split
+    # meaningless. That check runs first because it costs no inference and finds
+    # the failure in seconds rather than after an hour of cross-encoding.
+    validate: list[Measurement] = []
+    if validate_first:
+        for split in spec.judgments:
+            validate.append(
+                _invoke(
+                    spec,
+                    engine,
+                    sandbox,
+                    prepared,
+                    environment,
+                    stage="validate",
+                    split=split,
+                    emit=emit,
+                )
+            )
+            item = validate[-1]
+            emit(
+                f"validate[{split.name}] exit {item.exit_code} in "
+                f"{item.elapsed_seconds:.1f} s"
+            )
+            if item.exit_code != 0:
+                _fail(
+                    arm,
+                    log_path,
+                    f"validate ({split.name})",
+                    _outcome(item),
+                    (
+                        f"The judged set {split.path} could not be resolved against "
+                        f"this arm's generation. Every number for this split would "
+                        f"describe nothing, so the run stops here rather than after "
+                        f"measuring it."
+                    ),
+                )
+
+    measurements: list[Measurement] = []
+    for split in spec.judgments:
+        measurements.append(
+            _invoke(
+                spec,
+                engine,
+                sandbox,
+                prepared,
+                environment,
+                stage="measure",
+                split=split,
+                emit=emit,
+            )
         )
-    try:
-        json.loads(report_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise ExperimentError(
-            f"The report arm {arm.name!r} wrote is not readable JSON: {report_path}: "
-            f"{exc}. The full output is in {log_path}."
-        ) from exc
+        item = measurements[-1]
+        emit(
+            f"measure[{split.name}] exit {item.exit_code} in {item.elapsed_seconds:.1f} s"
+        )
+        if item.exit_code != 0:
+            _fail(arm, log_path, f"measure ({split.name})", _outcome(item))
+        _require_report(arm, item, log_path)
 
     if not keep_sandbox:
         from ..sandbox import remove as remove_sandbox
@@ -258,10 +342,90 @@ def run_arm(
         sandbox=sandbox,
         settings=prepared.settings,
         prepare=prepare_results,
-        measure=measure,
-        report_path=report_path,
+        validate=tuple(validate),
+        measure=tuple(measurements),
         log_path=log_path,
     )
+
+
+def _invoke(
+    spec: RunSpec,
+    engine: EngineSource,
+    sandbox: Sandbox,
+    prepared: PreparedArm,
+    environment: dict[str, str],
+    *,
+    stage: str,
+    split: JudgedSet,
+    emit: Callable[[str], None],
+) -> Measurement:
+    """Run the app's harness once, for one stage and one split."""
+
+    report_path = prepared.report_path.with_name(
+        REPORT_PATTERN.format(split=_segment(split.name))
+    )
+    command = _measure_command(spec, engine, sandbox, split, report_path, stage=stage)
+    emit(f"{stage}[{split.name}]: {command}")
+    outcome = _run(
+        command, environment, cwd=sandbox.root, timeout=MEASURE_TIMEOUT_SECONDS
+    )
+    return Measurement(
+        stage=stage,
+        split=split.name,
+        command=command,
+        exit_code=int(outcome["exit_code"]),
+        elapsed_seconds=float(outcome["elapsed_seconds"]),
+        stdout=str(outcome["stdout"]),
+        stderr=str(outcome["stderr"]),
+        report=report_path if stage == "measure" else None,
+    )
+
+
+def _require_report(arm: Arm, item: Measurement, log_path: Path) -> None:
+    """Refuse a clean exit that wrote no readable report.
+
+    A harness that resolved nothing and exited cleanly has measured nothing, and a
+    row of zeroes read as "this variant found nothing" is the most expensive kind
+    of wrong number a harness can produce.
+    """
+
+    if item.report is None or not item.report.is_file():
+        raise ExperimentError(
+            f"Arm {arm.name!r} exited cleanly and wrote no report for split "
+            f"{item.split!r} at {item.report}. The full output is in {log_path}."
+        )
+    try:
+        json.loads(item.report.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ExperimentError(
+            f"The report arm {arm.name!r} wrote for split {item.split!r} is not "
+            f"readable JSON: {item.report}: {exc}. The full output is in {log_path}."
+        ) from exc
+
+
+def _segment(name: str) -> str:
+    """Turn a split name into one path segment.
+
+    A split name is a record key and a printed label, so it is not assumed to be a
+    safe file name; anything outside a plain word is replaced rather than
+    interpreted as a path.
+    """
+
+    safe = "".join(
+        character if character.isalnum() or character in "-_" else "-"
+        for character in name
+    ).strip("-")
+    return safe or "split"
+
+
+def _outcome(item: Measurement) -> dict[str, Any]:
+    return {
+        "exit_code": item.exit_code,
+        "elapsed_seconds": item.elapsed_seconds,
+        "stdout": item.stdout,
+        "stderr": item.stderr,
+        "command": list(item.command),
+    }
 
 
 def effective_overlay(arm: Arm, harness: dict[str, Any]) -> dict[str, Any]:
@@ -286,7 +450,10 @@ def _measure_command(
     spec: RunSpec,
     engine: EngineSource,
     sandbox: Sandbox,
+    split: JudgedSet,
     report_path: Path,
+    *,
+    stage: str,
 ) -> list[str]:
     """The exact command the app's own harness is asked to run.
 
@@ -302,12 +469,14 @@ def _measure_command(
         PROJECT_FLAG,
         str(sandbox.root),
         JUDGMENTS_FLAG,
-        str(spec.judgments),
+        str(split.path),
         REPORT_FLAG,
         str(report_path),
     ]
     for key, value in spec.harness.items():
         command.extend(_harness_flag(key, value))
+    if stage == "validate":
+        command.append(VALIDATE_FLAG)
     return command
 
 
@@ -345,12 +514,20 @@ def _harness_flag(key: str, value: Any) -> list[str]:
     return [flag, str(value)]
 
 
-def _fail(arm: Arm, log_path: Path, stage: str, outcome: dict[str, Any]) -> None:
+def _fail(
+    arm: Arm,
+    log_path: Path,
+    stage: str,
+    outcome: dict[str, Any],
+    because: str = "",
+) -> None:
+    tail = _tail(outcome.get("stderr") or outcome.get("stdout") or "")
     raise ExperimentError(
         f"Arm {arm.name!r} failed at the {stage} step with exit "
         f"{outcome['exit_code']}.\n"
-        f"  command: {' '.join(outcome['command'])}\n"
-        f"  output:  {_tail(outcome.get('stderr') or outcome.get('stdout') or '')}\n"
+        + (f"  because:  {because}\n" if because else "")
+        + f"  command: {' '.join(outcome['command'])}\n"
+        f"  output:  {tail}\n"
         f"  full:    {log_path}"
     )
 

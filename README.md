@@ -99,8 +99,8 @@ project root holds nothing but what the app itself writes.
 
 ## Running an experiment
 
-A run specification is JSON. `examples/retrieval-depth-sweep.json` is a working
-one.
+A run specification is JSON. `examples/candidate-window-ablation.json` is a
+two-split one and `examples/retrieval-depth-sweep.json` a single-set one.
 
 ```bash
 uv run rag-experiments run --spec examples/retrieval-depth-sweep.json \
@@ -111,6 +111,13 @@ uv run rag-experiments run --spec examples/retrieval-depth-sweep.json \
 corpus, applying any patch, resolving and pinning the settings — and stops. It is
 the check to run before an expensive run, and what it refuses is what a real run
 would refuse.
+
+A real run asks the app's harness to resolve every judged target before it
+searches, once per arm and once per split, and reports each outcome. A target that
+does not resolve uniquely would make every number for that split meaningless, and
+finding that costs seconds here rather than after an hour of cross-encoding.
+`--no-validate` skips the check, which is only safe when the judged set and the
+generation have not changed since the last run.
 
 Without `--dry-run`, each arm is measured in its own sandbox, and the run writes
 one record under `--runs`. Each arm may declare:
@@ -123,6 +130,12 @@ one record under `--runs`. Each arm may declare:
 | `base` | A revision for a code arm to move to before its patch applies. |
 | `patch` | A unified diff applied to the disposable checkout. |
 | `prepare` | Commands to run before measuring, for an arm that rebuilds a generation. |
+
+`judgments` is one path, or a list of `{"name", "path"}` splits. Two splits in
+one run is the point: a development number and a held-out number are only
+comparable when the same arms produced both, and two specifications listing the
+same arms can drift apart between two runs. The split names have to differ,
+because the record and the table key on them.
 
 The `harness` block holds the per-run conditions. Four of its entries are
 settings rather than arguments, and they are folded into each arm's overlay
@@ -155,10 +168,21 @@ uv run rag-experiments compare --run runs/<run-directory>
 uv run rag-experiments compare --run runs/<run-directory> --json
 ```
 
-The table is one block per measured mode, because a mode is a different question
-asked the same queries. The first arm the specification listed is the row every
-other arm is read against. A column the app's report stopped carrying prints as a
-dash, because a missing metric and a zero metric are not the same fact.
+The table is one block per split and per mode, because a split is a different
+set of questions and a mode is a different question asked the same queries. The
+first arm the specification listed is the row every other arm is read against. A
+column the app's report stopped carrying prints as a dash, because a missing
+metric and a zero metric are not the same fact.
+
+Each block states every arm's candidate window and rerank budget above it, read
+from that arm's pinned settings. When they differ across arms, the block says a
+difference is a difference in budget as well as in policy: a candidate-window
+sweep varies the window on purpose, and a policy ablation is only comparable at a
+fixed one. Latency is shown as both p50 and p95, each a value that was measured
+rather than an interpolation.
+
+`--split` tabulates one split and `--mode` one mode, for reading a single number
+in isolation.
 
 The record names, for the run: the engine revision, branch, and whether its tree
 was dirty; the source project's digest before and after; the judged set's path,
@@ -201,7 +225,8 @@ uv run rag-experiments run --spec examples/retrieval-depth-sweep.json \
 ## What this repository does not contain
 
 - A corpus. Every path in an example names a project the reader has.
-- A judged query set. The one an example names belongs to the app.
+- A judged query set. The ones an example names belong to the app or to the
+  reader, and no example names a split it does not ship.
 - A patch. `patch` names one the reader wrote; a code arm with no patch and no
   base is refused.
 - A quality metric. See the first paragraph.
