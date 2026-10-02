@@ -4,6 +4,10 @@
 # A run directory holds the report each arm produced, the log it wrote, and the
 # record this toolkit assembles from both. Regenerate one instead of editing it.
 /runs/
+# Judged query sets and the development/held-out splits derived from them. These
+# are private annotations and belong outside tracked source, so they are generated
+# by examples/make-splits.py and never committed.
+/judgments/
 __pycache__/
 *.py[cod]
 .pytest_cache/
