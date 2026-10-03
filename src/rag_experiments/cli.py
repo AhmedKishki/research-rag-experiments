@@ -13,6 +13,7 @@ that stopped the run, and the log that holds the output are all one path away.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from pathlib import Path
@@ -94,6 +95,8 @@ def main(argv: list[str] | None = None) -> int:
             return _sandbox(args)
         if args.command == "compare":
             return _compare(args)
+        if args.command == "annotation":
+            return _annotation(args)
         if args.command == "verify":
             return _verify(args)
         return _inspect(args)  # inspect: the default command when one is named
@@ -137,7 +140,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--dry-run",
         action="store_true",
-        help="Prepare every arm and measure nothing. No record is written.",
+        help="Prepare every arm without searching and retain a guarded preparation record.",
     )
     run.add_argument(
         "--no-keep-sandboxes",
@@ -188,6 +191,36 @@ def build_parser() -> argparse.ArgumentParser:
         "--modes", default="", help="Comma-separated modes to tabulate."
     )
     compare.add_argument("--split", default=None, help="One split to tabulate.")
+
+    annotation = commands.add_parser(
+        "annotation",
+        help="Prepare blinded private author-review packets and validate judgments.",
+    )
+    annotation_commands = annotation.add_subparsers(
+        dest="annotation_command", required=True
+    )
+    build = annotation_commands.add_parser(
+        "build", help="Pool verified candidates; assign no judgments."
+    )
+    build.add_argument("--spec", type=Path, required=True)
+    build.add_argument(
+        "--output", type=Path, required=True, help="New private package directory."
+    )
+    check = annotation_commands.add_parser(
+        "check", help="Validate returned author judgments."
+    )
+    check.add_argument("--pool", type=Path, required=True)
+    check.add_argument("--judgments", type=Path, required=True)
+    check.add_argument("--require-complete", action="store_true")
+    check.add_argument(
+        "--details",
+        action="store_true",
+        help="Include every pending/uncertain opaque identifier.",
+    )
+    inspect_pool = annotation_commands.add_parser(
+        "inspect", help="Verify package hashes and show work counts."
+    )
+    inspect_pool.add_argument("--pool", type=Path, required=True)
 
     sandbox = commands.add_parser(
         "sandbox", help="Create, list, and remove a project's copy by hand."
@@ -273,6 +306,46 @@ def _engine_from_environment() -> Path:
         if (parent / PACKAGE_RELATIVE).is_file():
             return parent
     return installed.parent
+
+
+def _annotation(args: argparse.Namespace) -> int:
+    from .annotation import build_pool, check_annotations, load_package
+
+    if args.annotation_command == "build":
+        summary = build_pool(args.spec, args.output)
+    elif args.annotation_command == "inspect":
+        loaded = load_package(args.pool)
+        pool = loaded["pool"]
+        summary = {
+            "pool_id": pool["pool_id"],
+            "role": pool["role"],
+            "questions": len(pool["questions"]),
+            "items": len(pool["items"]),
+            "pairs": len(pool["pairs"]),
+            "integrity": "verified",
+            "policy_ready": False,
+        }
+    else:
+        summary = check_annotations(args.pool, args.judgments)
+        if not args.details:
+            summary = {
+                **summary,
+                **{
+                    section: {
+                        key: len(value) if isinstance(value, list) else value
+                        for key, value in summary.get(section, {}).items()
+                    }
+                    for section in ("pending", "uncertain")
+                },
+            }
+    print(json.dumps(summary, indent=2, ensure_ascii=False))
+    if (
+        args.annotation_command == "check"
+        and args.require_complete
+        and summary["status"] != "complete"
+    ):
+        return EXIT_REFUSED
+    return EXIT_VERIFIED
 
 
 def _run(args: argparse.Namespace) -> int:

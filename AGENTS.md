@@ -53,6 +53,9 @@ description: State the experiment toolkit's safety, measurement, and engineering
 - A final result list follows existing repetition collapse; it cannot establish whether the reranker spent budget on copies.
 - A partition of an inspected benchmark is exploratory, not an untouched holdout.
 - No target exclusion is implicit; retain its ID and adjudication reason with the inputs.
+- Annotation preparation may collect evidence and validate author input; it must not assign grades from ranks, scores, or designated targets.
+- Keep provenance keys and consistency-repeat mappings outside the reviewer packet.
+- Keep frozen packets separate from returned judgments; completed annotations are not policy acceptance.
 - A policy decision requires author-judged evidence and target-family-aware uncertainty, not a one-query change or a count of correlated slots.
 
 ## Ownership and writing

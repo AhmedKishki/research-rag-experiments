@@ -8,6 +8,10 @@
 # are private annotations and belong outside tracked source, so they are generated
 # by examples/make-splits.py and never committed.
 /judgments/
+# Private reviewer packets, source copies, and returned human judgments.
+/annotations/
+/build/
+/dist/
 __pycache__/
 *.py[cod]
 .pytest_cache/

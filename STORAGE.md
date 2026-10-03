@@ -1,4 +1,4 @@
-# `storage/`
+# Storage
 
 What a run leaves on disk, and what a reader may conclude from it.
 
@@ -9,6 +9,8 @@ not spelled out in this repository. What follows is the layout *this* repository
 owns.
 
 ## Two directories, two jobs
+
+- Private annotation packets use the separate format at the end of this document.
 
 ```
 <workspace>/                                 the sandbox area: large and disposable
@@ -154,3 +156,71 @@ A record written before this layout keeps its own paths, and they are absolute, 
 `rag-experiments compare` still reads them where they are. A record written by an
 earlier schema has no `verdict` this file lists, and its `source_project.guard` has
 no `state`: `compare` says so rather than presenting it as verified.
+
+## Private annotation packages
+
+```text
+annotations/<name>/
+  private/
+    manifest.json       selected input hashes, limits, coverage, package inventory
+    key.json            question/item/pair origins and hidden consistency repeats
+  reviewer/
+    pool.json           opaque IDs, questions, passages, scholarly source context
+    rubric.json         frozen proposed grading definitions
+    template.json       complete inventory with every judgment pending
+    review.html         self-contained offline author interface
+    originals/          independent source copies with recorded SHA-256
+```
+
+- Schema version 1 defines the pool, package manifest, and returned annotations.
+- Directories use owner-only permissions; files use owner read/write permissions.
+- Publication reserves a new directory exclusively and installs the private manifest last.
+- Ordinary failure removes only the publisher's own staging and claimed output.
+- Hard termination may leave an ignored owner-only staging directory, not a completed packet.
+- Package validation requires the complete recorded inventory and checks every file hash.
+- Returned judgments stay outside the frozen packet.
+- Private records retain every selected report/scorer digest and frozen input digest.
+- Generation identity comes from the report's measured project, not historical judged-file corpus metadata.
+- Canonical text matches the immutable artifact lookup's hash; originals match source manifest hashes.
+- Generation text and reviewed bibliography must agree across selected snapshots.
+- Missing retained copies cause refusal, never fallback to a live project.
+- Different scorer revisions may supply candidates for labeling, with private provenance; no cross-scorer deltas are computed.
+
+### Pool specification
+
+| Key | Meaning |
+|---|---|
+| `schema_version` | `1`. |
+| `name` | Safe packet label. |
+| `inputs` | Explicit retained-run, arm, partition, and mode selections. |
+| `inputs[].run` | Run directory, relative to the specification or absolute. |
+| `inputs[].arms`, `splits`, `modes` | Nonempty selected-name lists; unknown names refuse. |
+| `inputs[].include_results` | Include returned passages; defaults true. |
+| `inputs[].include_collapsed_pairs` | Include both endpoints of retained collapse examples; defaults true. |
+| `include_designated_targets` | Include the currently resolved designated passage without revealing its status; defaults true. |
+| `max_candidates_per_query` | Refusal threshold for the mandatory union; defaults 60. |
+| `max_pairs_per_query` | Retained collapse pairs plus sampled other pairs; defaults 6; mandatory overflow refuses. |
+| `repeat_fraction` | Hidden consistency aliases; defaults 0.1, maximum 0.25. |
+| `family_limit` | Optional pilot limit retaining all queries of each selected frozen family. |
+| `seed` | Optional reproducible private ordering seed; omission uses random entropy. |
+
+- Equal text in different sources retains distinct attribution.
+- Bind questions to frozen target IDs and resolved report chunk IDs, not historic measurement chunk IDs.
+- Resolve families from frozen target/question declarations, not a report override.
+- Retain exclusions, limits, incomplete source-pair examples, and pair-sampling scope privately.
+- Source relations and human grades are never inferred automatically.
+
+### Returned judgments
+
+- `annotation/schema.py` owns the frozen proposed rubric and permitted typed values.
+- `pool_id`, `pool_sha256`, and `rubric_sha256` bind the response to its packet.
+- `rubric_acknowledged` and `annotator` record acknowledgment and identity.
+- Each `items[]` row contains `item_id`, `relevance`, `usability`, `source_verified`, and text `notes`.
+- Each `pairs[]` row contains `pair_id`, `relation`, and text `notes`.
+- `null` means pending, never irrelevant or unusable.
+- Missing, duplicate, unknown, foreign-pool, and wrong-type rows refuse validation.
+- Explicit uncertainty requires adjudication.
+- Contradiction and independent-corroboration assertions require notes and original-source checks for both endpoints.
+- Consistency aliases map to the same primary card privately; they are not additional annotators.
+- `complete` means the acknowledged inventory is filled, not that a policy improved.
+- `policy_ready` remains false; no relevance or latency metric is computed here.

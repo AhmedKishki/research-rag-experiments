@@ -5,8 +5,8 @@ or more measured arms against it, and records what each arm ran and measured.
 It never writes inside the project it measures, and it proves that by comparing
 a digest of that project's bytes taken before and after a run.
 
-Each folder under `src/rag_experiments/` owns one concern and carries a
-`README.md` saying what it owns and what it may never do.
+Each folder under `src/rag_experiments/` owns one concern. The package README
+maps those concerns, and module docstrings state their local mechanisms.
 """
 
 from __future__ import annotations

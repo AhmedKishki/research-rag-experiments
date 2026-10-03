@@ -17,6 +17,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from rag_experiments._families import connected_families
+
 PARTITIONS = ("exploratory-a", "exploratory-b")
 
 
@@ -40,36 +42,17 @@ def split(
         raise ValueError("Each exclusion requires a nonempty reason")
 
     usable = sorted(used - set(exclusions))
-    parents = {target: target for target in usable}
-
-    def root(target: str) -> str:
-        while parents[target] != target:
-            target = parents[target]
-        return target
-
-    # Question families may span several targets. Merge those targets before
-    # allocation rather than assuming a target ID is always a whole family.
-    family_owner: dict[str, str] = {}
-    for query in queries:
-        target = str(query["target_id"])
-        if target not in parents:
-            continue
-        declared = {
-            str(value)
-            for value in (query.get("family_id"), targets[target].get("family_id"))
-            if value
-        }
-        for family in sorted(declared):
-            # Only explicit labels enter this map. A family named "t3" does not
-            # implicitly connect an unrelated target whose ID happens to be t3.
-            if family in family_owner:
-                first, second = root(family_owner[family]), root(target)
-                parents[max(first, second)] = min(first, second)
-            else:
-                family_owner[family] = target
+    selected_queries = [q for q in queries if str(q["target_id"]) in usable]
+    family_map = connected_families(
+        selected_queries, {key: targets[key] for key in usable}
+    )
+    declared_links = any(
+        q.get("family_id") or targets[str(q["target_id"])].get("family_id")
+        for q in selected_queries
+    )
     groups: dict[str, set[str]] = collections.defaultdict(set)
     for target in usable:
-        groups[root(target)].add(target)
+        groups[family_map[target]].add(target)
     if len(groups) < 2:
         raise ValueError("At least two independent target families are required")
 
@@ -96,7 +79,7 @@ def split(
             "excluded_targets": exclusions,
             "unqueried_targets": sorted(set(targets) - used),
             "unqueried_reason": "No query references these input targets",
-            "declared_family_links": bool(family_owner),
+            "declared_family_links": declared_links,
             "target_groups": {
                 group: sorted(members)
                 for group, members in groups.items()

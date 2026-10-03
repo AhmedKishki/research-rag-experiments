@@ -128,7 +128,7 @@ uv run rag-experiments run --spec /path/to/spec.json \
 ```bash
 uv run rag-experiments compare --run runs/<run-id>
 uv run rag-experiments compare --run runs/<run-id> --split exploratory-a
-uv run rag-experiments compare --run runs/<run-id> --mode hybrid+rerank
+uv run rag-experiments compare --run runs/<run-id> --modes hybrid+rerank
 uv run rag-experiments compare --run runs/<run-id> --json
 ```
 
@@ -142,6 +142,35 @@ uv run rag-experiments compare --run runs/<run-id> --json
 - Legacy reports remain readable, but superseded word-set diagnostics are not relabelled as corrected metrics.
 - Missing measurements print as dashes, not zeros.
 - Failed, incomplete, changed-source, and unknown-guard records do not claim a complete verified measurement.
+
+## Blinded author annotation
+
+```bash
+uv run rag-experiments annotation build --spec /path/to/pool-spec.json \
+    --output annotations/my-pool
+uv run rag-experiments annotation inspect --pool annotations/my-pool
+uv run rag-experiments annotation check --pool annotations/my-pool \
+    --judgments /path/to/downloaded-annotations.json
+```
+
+- Open `annotations/my-pool/reviewer/review.html` manually in a browser.
+- The page works offline without a server, external scripts, or model calls.
+- Questions, canonical extracted passages, source attribution, locators, and independent original-file copies are visible.
+- Arm names, ranks, scores, internal identifiers, designated-target flags, and repeat mappings are withheld.
+- The proposed rubric separates relevance, usability, source checking, and evidence relations.
+- A counterargument can be directly relevant; relevance does not mean agreement.
+- All grades start pending; a missing grade is not a negative grade.
+- Strong contradiction and independent-corroboration claims require original-source checks and notes.
+- Save partial work and reopen it on the same page; `--require-complete` makes the check fail while judgments remain incomplete or need adjudication.
+- Save returned judgments outside the frozen packet, such as `annotations/responses/` or a private Downloads directory.
+- Share only the `reviewer/` directory when sharing authorized sources; keep `private/` with the operator.
+- Blinding hides assignments on the review page; it does not stop the account owner from reading private mappings or recognizing familiar material.
+- These packages are exploratory, including packages drawn from a partition named `held-out`.
+- Candidate unions and recorded collapse-pair endpoints are preserved; a limit refuses an oversized union instead of silently dropping candidates.
+- Other relationship pairs are sampled, not an exhaustive pairwise inventory.
+- Consistency repeats are hidden aliases, not independent annotators.
+- Annotation completeness does not establish a quality improvement or enable policy acceptance.
+- `STORAGE.md` owns the package and specification formats.
 
 ## Validation
 
