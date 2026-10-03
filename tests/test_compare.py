@@ -733,3 +733,20 @@ def test_prepared_record_is_not_presented_as_a_verified_measurement():
     assert text.startswith("PREPARATION ONLY: no measurements")
     assert "source guard unchanged" in text
     assert "No arm of this run reported a measured mode" in text
+
+
+def test_shared_unjudged_no_answer_scope_is_concise_but_explicit(tmp_path):
+    record = _two_split_record(tmp_path)
+    for arm in record["arms"]:
+        for path in arm["reports"].values():
+            report = json.loads(Path(path).read_text())
+            report["no_answer_support"] = {
+                "measured": False,
+                "judged_no_answer_queries": 0,
+                "note": "long explanatory note",
+            }
+            Path(path).write_text(json.dumps(report), encoding="utf-8")
+    text = render_comparison(record)
+    assert text.count("no-answer scope: not measured;") == 2
+    assert "every arm has 0 judged no-answer queries" in text
+    assert "long explanatory note" not in text

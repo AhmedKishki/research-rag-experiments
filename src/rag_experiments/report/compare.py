@@ -344,13 +344,24 @@ def _table(split: str, mode: str, rows: list[dict[str, Any]]) -> str:
     lines.append(_budget_line(rows))
     lines.append(_observed_budgets(rows))
     if any(r["no_answer_support"] for r in rows):
-        lines.append(
-            "no-answer scope: "
-            + "   ".join(
-                f"{r['arm']}: {json.dumps(r['no_answer_support'], sort_keys=True)}"
-                for r in rows
+        scopes = [r["no_answer_support"] for r in rows]
+        if all(
+            isinstance(s, dict)
+            and s.get("measured") is False
+            and s.get("judged_no_answer_queries") == 0
+            for s in scopes
+        ):
+            lines.append(
+                "no-answer scope: not measured; every arm has 0 judged no-answer queries."
             )
-        )
+        else:
+            lines.append(
+                "no-answer scope: "
+                + "   ".join(
+                    f"{r['arm']}: {json.dumps(r['no_answer_support'], sort_keys=True)}"
+                    for r in rows
+                )
+            )
     if any(r["degraded"] for r in rows):
         lines.append(
             "DEGRADED: reranking fallback or report degradation; do not select a policy from this block."
