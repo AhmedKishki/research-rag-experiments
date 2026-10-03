@@ -217,6 +217,28 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Include every pending/uncertain opaque identifier.",
     )
+    export = annotation_commands.add_parser(
+        "export",
+        help="Join completed author labels to retained rankings; do not score them.",
+    )
+    export.add_argument("--pool", type=Path, required=True)
+    export.add_argument("--judgments", type=Path, required=True)
+    export.add_argument(
+        "--output",
+        type=Path,
+        required=True,
+        help="New private handoff JSON outside the frozen packet.",
+    )
+    score = annotation_commands.add_parser(
+        "score",
+        help="Delegate a completed handoff to the app-owned saved-label scorer.",
+    )
+    score.add_argument("--input", type=Path, required=True)
+    score.add_argument("--app-source", type=Path, required=True)
+    score.add_argument("--report", type=Path, required=True)
+    score.add_argument("--baseline")
+    score.add_argument("--bootstrap-samples", type=int, default=2000)
+    score.add_argument("--seed", type=int, default=0)
     inspect_pool = annotation_commands.add_parser(
         "inspect", help="Verify package hashes and show work counts."
     )
@@ -311,7 +333,22 @@ def _engine_from_environment() -> Path:
 def _annotation(args: argparse.Namespace) -> int:
     from .annotation import build_pool, check_annotations, load_package
 
-    if args.annotation_command == "build":
+    if args.annotation_command == "score":
+        from .annotation.scoring import score_handoff
+
+        summary = score_handoff(
+            args.input,
+            args.app_source,
+            args.report,
+            baseline=args.baseline,
+            bootstrap_samples=args.bootstrap_samples,
+            seed=args.seed,
+        )
+    elif args.annotation_command == "export":
+        from .annotation.export import export_handoff
+
+        summary = export_handoff(args.pool, args.judgments, args.output)
+    elif args.annotation_command == "build":
         summary = build_pool(args.spec, args.output)
     elif args.annotation_command == "inspect":
         loaded = load_package(args.pool)

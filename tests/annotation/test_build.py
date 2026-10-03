@@ -143,6 +143,10 @@ def archive(tmp_path):
                     "target_id": "SECRET_TARGET",
                     "family_id": "SECRET_TARGET",
                     "mode": "hybrid+rerank",
+                    "top_k": 2,
+                    "candidate_depth": 40,
+                    "rerank_window": 2,
+                    "rerank_requested": True,
                     "reranked": True,
                     "rerank_fallback": None,
                     "target_chunk_id": "INTERNAL_GOLD",
@@ -507,3 +511,145 @@ def test_nontext_notes_are_not_valid_human_annotation(archive, value):
     write(response, template)
     with pytest.raises(ExperimentError, match="notes must be text"):
         check_annotations(archive["output"], response)
+
+
+def synthetic_judgments(archive):
+    path = archive["output"] / "reviewer" / "template.json"
+    data = json.loads(path.read_text())
+    data["annotator"] = "synthetic test fixture, not real author judgments"
+    data["rubric_acknowledged"] = True
+    for row in data["items"]:
+        row.update(relevance="direct", usability="usable", source_verified=True)
+    for row in data["pairs"]:
+        row["relation"] = "copy"
+    response = archive["output"].parent / "synthetic-response.json"
+    write(response, data)
+    return response
+
+
+def test_pending_packet_refuses_handoff_and_produces_no_file(archive):
+    from rag_experiments.annotation.export import export_handoff
+
+    build_pool(archive["spec"], archive["output"])
+    output = archive["output"].parent / "handoff.json"
+    with pytest.raises(ExperimentError, match="incomplete"):
+        export_handoff(
+            archive["output"], archive["output"] / "reviewer" / "template.json", output
+        )
+    assert not output.exists()
+
+
+def test_completed_handoff_joins_only_real_rankings_to_primary_labels(archive):
+    from rag_experiments.annotation.export import export_handoff
+
+    build_pool(archive["spec"], archive["output"])
+    output = archive["output"].parent / "handoff.json"
+    summary = export_handoff(archive["output"], synthetic_judgments(archive), output)
+    handoff = json.loads(output.read_text())
+    assert handoff["protocol"] == "author_pool_v1"
+    assert handoff["role"] == "exploratory"
+    assert len(handoff["judgments"]) == 3
+    assert len(handoff["conditions"]) == 1
+    assert len(handoff["conditions"][0]["rankings"][0]["passage_ids"]) == 2
+    assert handoff["label_validation"]["status"] == "complete"
+    assert summary["policy_ready"] is False
+    assert not any("passage" in row for row in handoff["judgments"])
+    assert output.stat().st_mode & 0o777 == 0o600
+    with pytest.raises(ExperimentError, match="new nonlinked"):
+        export_handoff(archive["output"], synthetic_judgments(archive), output)
+
+
+def test_uncertain_label_is_not_changed_into_zero_relevance(archive):
+    from rag_experiments.annotation.export import export_handoff
+
+    build_pool(archive["spec"], archive["output"])
+    response = synthetic_judgments(archive)
+    data = json.loads(response.read_text())
+    data["items"][0]["relevance"] = "uncertain"
+    write(response, data)
+    output = archive["output"].parent / "handoff.json"
+    with pytest.raises(ExperimentError, match="adjudication_required"):
+        export_handoff(archive["output"], response, output)
+    assert not output.exists()
+
+
+def test_handoff_cannot_write_inside_frozen_inputs_or_original_project(archive):
+    from rag_experiments.annotation.export import export_handoff
+
+    build_pool(archive["spec"], archive["output"])
+    response = synthetic_judgments(archive)
+    for output in (
+        archive["output"] / "handoff.json",
+        archive["project"] / "handoff.json",
+        archive["output"].parent / "live-original" / "handoff.json",
+    ):
+        with pytest.raises(ExperimentError):
+            export_handoff(archive["output"], response, output)
+
+
+def test_toolkit_delegates_synthetic_quality_scoring_to_app(archive, app_source):
+    from rag_experiments.annotation.export import export_handoff
+    from rag_experiments.annotation.scoring import score_handoff
+
+    app = app_source
+    if not (app / "scripts" / "evaluate_pooled.py").is_file():
+        pytest.skip("App-owned pooled scorer is not present in this development layout")
+    build_pool(archive["spec"], archive["output"])
+    handoff = archive["output"].parent / "synthetic-handoff.json"
+    export_handoff(archive["output"], synthetic_judgments(archive), handoff)
+    report = archive["output"].parent / "synthetic-pooled-report.json"
+    summary = score_handoff(handoff, app, report, bootstrap_samples=50)
+    scored = json.loads(report.read_text())
+    assert summary["policy_ready"] is False
+    assert scored["report_meta"]["measurement_kind"] == "pooled_author_labels"
+    assert scored["decision"]["policy_ready"] is False
+    assert scored["no_answer"]["measured"] is False
+    assert (
+        scored["conditions"][0]["queries"][0]["direct_usable_precision_returned"] == 1.0
+    )
+    with pytest.raises(ExperimentError, match="new nonlinked"):
+        score_handoff(handoff, app, report)
+
+
+def test_overlapping_selected_partitions_cannot_duplicate_ranked_queries(archive):
+    from rag_experiments.annotation.export import prepare_handoff
+
+    record = json.loads((archive["run"] / "run.json").read_text())
+    record["judgments"].append({**record["judgments"][0], "name": "overlap"})
+    record["arms"][0]["measure"].append(
+        {**record["arms"][0]["measure"][0], "split": "overlap"}
+    )
+    record["arms"][0]["reports"]["overlap"] = str(archive["report"])
+    write(archive["run"] / "run.json", record)
+    spec = json.loads(archive["spec"].read_text())
+    spec["inputs"][0]["splits"].append("overlap")
+    write(archive["spec"], spec)
+    build_pool(archive["spec"], archive["output"])
+    with pytest.raises(ExperimentError, match="partitions overlap"):
+        prepare_handoff(archive["output"], synthetic_judgments(archive))
+
+
+def test_missing_budget_is_named_at_export_not_hidden_in_app_refusal(archive):
+    from rag_experiments.annotation.export import prepare_handoff
+
+    report = json.loads(archive["report"].read_text())
+    report["runs"][0].pop("candidate_depth")
+    write(archive["report"], report)
+    record = json.loads((archive["run"] / "run.json").read_text())
+    record["arms"][0]["measure"][0]["report_sha256"] = sha(archive["report"])
+    write(archive["run"] / "run.json", record)
+    build_pool(archive["spec"], archive["output"])
+    with pytest.raises(ExperimentError, match="observed budget candidate_depth"):
+        prepare_handoff(archive["output"], synthetic_judgments(archive))
+
+
+def test_relative_run_selection_survives_into_handoff(archive):
+    from rag_experiments.annotation.export import prepare_handoff
+
+    spec = json.loads(archive["spec"].read_text())
+    spec["inputs"][0]["run"] = "retained-run"
+    write(archive["spec"], spec)
+    build_pool(archive["spec"], archive["output"])
+    handoff = prepare_handoff(archive["output"], synthetic_judgments(archive))
+    assert len(handoff["conditions"]) == 1
+    assert handoff["conditions"][0]["metadata"]["partitions"] == ["exploratory"]

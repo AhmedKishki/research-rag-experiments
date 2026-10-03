@@ -224,3 +224,21 @@ annotations/<name>/
 - Consistency aliases map to the same primary card privately; they are not additional annotators.
 - `complete` means the acknowledged inventory is filled, not that a policy improved.
 - `policy_ready` remains false; no relevance or latency metric is computed here.
+
+## Author judgment handoff
+
+- `annotation export` produces a new private JSON file only after completed, acknowledged, adjudicated author labels pass validation.
+- Relevance and usability conflicts on hidden repeat aliases require adjudication.
+- Repeat aliases are excluded from the primary judgment inventory.
+- `schema_version: 1` and `protocol: author_pool_v1` distinguish the handoff from retrieval reports and annotation responses.
+- `provenance` retains pool, rubric, annotation, generation, and retained-report hashes.
+- The frozen rubric uses SHA-256 over sorted-key UTF-8 JSON with fixed separators.
+- `protected_roots` prevents outputs within packets, retained inputs, original projects, or the app checkout.
+- `questions` retains the frozen question and family identifiers for paired analysis.
+- `judgments` retains the author labels and each generation-bound occurrence's source path, locator, content digest, and chunk identifier.
+- `relations` contains only authored pair labels; unknown relationships are not inferred.
+- `conditions[].rankings` joins the scored occurrence identifiers to actual returned lists, requested reply depth, observed branch depth, and applied rerank window.
+- Each scored condition covers the same frozen questions and graded pool.
+- Material selected only for collapse review is not automatically a scored condition.
+- Scoring after re-chunking needs new source-span resolution; occurrence labels are not blindly portable between generations.
+- Handoffs and app-owned score reports are generated private artifacts, not tracked source or source documents.

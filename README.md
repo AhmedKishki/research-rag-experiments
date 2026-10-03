@@ -172,6 +172,29 @@ uv run rag-experiments annotation check --pool annotations/my-pool \
 - Annotation completeness does not establish a quality improvement or enable policy acceptance.
 - `STORAGE.md` owns the package and specification formats.
 
+## Score completed author judgments
+
+```bash
+uv run rag-experiments annotation export --pool annotations/my-pool \
+    --judgments /path/to/downloaded-annotations.json \
+    --output annotations/results/handoff.json
+uv run rag-experiments annotation score --input annotations/results/handoff.json \
+    --app-source /path/to/research-rag --report annotations/results/pooled-report.json
+```
+
+- Export refuses pending, uncertain, unacknowledged, or inconsistent repeated judgments.
+- The handoff joins primary labels to actual retained rankings; hidden repeats are not additional observations.
+- Collapse-only material contributes judgments and relations, not an incompletely pooled scoring condition.
+- The toolkit validates provenance and delegates metric computations to the app's standalone `scripts/evaluate_pooled.py`.
+- This scorer reads saved judgments and rankings; it runs no model and accesses no live project.
+- Pooled scoring is a separate protocol, not a change to the known-item metrics.
+- Coverage is relative to the judged pool, not exhaustive corpus recall.
+- Missing pair relations are unknown, not unrelated; sampled pairs do not establish unique-evidence coverage.
+- Paired intervals weight question families and compare one condition at a time; they are exploratory and not policy acceptance or equivalence tests.
+- Different observed budgets remain a confound for a policy-only claim.
+- No-answer correctness and boundary quality remain unmeasured unless a later protocol adds author judgments for them.
+- New private handoffs and reports must stay outside the frozen packet and protected source roots.
+
 ## Validation
 
 ```bash

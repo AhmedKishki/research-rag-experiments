@@ -198,6 +198,10 @@ def build_pool(spec_path: Path, output: Path) -> dict[str, Any]:
     spec_path = safe_file(spec_path)
     spec_sha = digest(spec_path)
     spec = load_spec(spec_path)
+    for selection in spec["inputs"]:
+        selection["run"] = str(
+            (spec_path.parent / Path(selection["run"]).expanduser()).absolute()
+        )
     output = output.expanduser().absolute()
     evidence = read_evidence(spec, spec_path.parent)
     _output_guard(output, evidence)
