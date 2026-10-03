@@ -33,6 +33,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .._imports import without_bytecode
 from ..errors import ExperimentError
 from .layout import relocated_runtime_of
 
@@ -122,6 +123,7 @@ class Snapshot:
         }
 
 
+@without_bytecode
 def volatile_paths() -> tuple[str, ...]:
     """The paths a serving app rewrites on its own, named by the app's own code.
 
@@ -157,6 +159,7 @@ def _volatile_names() -> tuple[str, ...]:
     )
 
 
+@without_bytecode
 def snapshot(root: Path) -> Snapshot:
     """Digest every guarded path under a project root.
 

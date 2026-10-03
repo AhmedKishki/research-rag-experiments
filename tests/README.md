@@ -1,5 +1,7 @@
 # `tests/`
 
+- `test_import_protection.py` covers cold programmatic reads, nested import protection, and restoration after failure.
+
 Tests mirror the folders under `src/rag_experiments/`, so a change to one
 concern is tested by that concern's tests alone.
 

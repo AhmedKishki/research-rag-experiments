@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .._imports import without_bytecode
 from ..errors import ExperimentError
 
 #: Where the copied originals live inside a project, relative to its root. This
@@ -92,6 +93,7 @@ class ProjectLayout:
         }
 
 
+@without_bytecode
 def read_layout(root: Path) -> ProjectLayout:
     """Resolve the app's own on-disk names for the project at `root`.
 
@@ -167,6 +169,7 @@ def read_layout(root: Path) -> ProjectLayout:
     )
 
 
+@without_bytecode
 def relocated_runtime_of(root: Path) -> Path | None:
     """Where a project's derived state was relocated to, or None.
 
@@ -213,6 +216,7 @@ def refuse_nested(area: Path, root: Path, *, what: str, inside: str) -> None:
         )
 
 
+@without_bytecode
 def selected_generation(layout: ProjectLayout) -> str:
     """The generation the project's own pointer names, or a reason there is none.
 
