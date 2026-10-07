@@ -34,6 +34,7 @@ from ..engine.runner import (
     resolve_settings_for_tree,
 )
 from ..errors import ExperimentError
+from ..niceness import run_low_priority
 from ..sandbox import Sandbox, pin_settings, refuse_nested
 from ..sandbox import create as create_sandbox
 from .checkout import Checkout, make_checkout
@@ -853,7 +854,7 @@ def _run(
 ) -> dict[str, Any]:
     started = time.perf_counter()
     try:
-        completed = subprocess.run(
+        completed = run_low_priority(
             command,
             capture_output=True,
             text=True,

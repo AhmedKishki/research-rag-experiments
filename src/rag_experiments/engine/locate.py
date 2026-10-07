@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from ..errors import ExperimentError
+from ..niceness import run_low_priority
 
 #: What makes a directory a research-rag tree. The harness script is named here
 #: rather than imported, because it is a script the app ships in its repository
@@ -211,7 +212,7 @@ def _git(root: Path, arguments: list[str]) -> str | None:
     environment = dict(os.environ)
     environment[NO_OPTIONAL_LOCKS_ENV] = "0"
     try:
-        completed = subprocess.run(
+        completed = run_low_priority(
             ["git", "-C", str(root), *arguments],
             capture_output=True,
             text=True,

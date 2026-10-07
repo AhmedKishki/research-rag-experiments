@@ -97,6 +97,8 @@ def main(argv: list[str] | None = None) -> int:
             return _compare(args)
         if args.command == "annotation":
             return _annotation(args)
+        if args.command == "performance":
+            return _performance(args)
         if args.command == "verify":
             return _verify(args)
         return _inspect(args)  # inspect: the default command when one is named
@@ -177,6 +179,18 @@ def build_parser() -> argparse.ArgumentParser:
         "inspect", help="Report what a run would copy, without copying it."
     )
     _add_source_arguments(inspect)
+
+    performance = commands.add_parser(
+        "performance",
+        help="Run cold-process and warm-search probes without quality scoring.",
+    )
+    performance.add_argument("--spec", type=Path, required=True)
+    performance.add_argument("--app-source", type=Path, required=True)
+    performance.add_argument("--workspace", type=Path, required=True)
+    performance.add_argument("--runs", type=Path, required=True)
+    performance.add_argument("--blocks", type=int, default=3)
+    performance.add_argument("--warmup-count", type=int, default=3)
+    performance.add_argument("--seed", type=int, default=0)
 
     compare = commands.add_parser(
         "compare", help="Print the comparison table for a run."
@@ -328,6 +342,22 @@ def _engine_from_environment() -> Path:
         if (parent / PACKAGE_RELATIVE).is_file():
             return parent
     return installed.parent
+
+
+def _performance(args: argparse.Namespace) -> int:
+    from .performance import run_performance
+
+    result = run_performance(
+        args.spec,
+        args.app_source,
+        args.workspace,
+        args.runs,
+        blocks=args.blocks,
+        warmup_count=args.warmup_count,
+        seed=args.seed,
+    )
+    print(json.dumps(result, indent=2))
+    return EXIT_VERIFIED
 
 
 def _annotation(args: argparse.Namespace) -> int:

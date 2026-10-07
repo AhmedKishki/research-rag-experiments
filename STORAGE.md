@@ -148,7 +148,27 @@ into the sandbox.
 ### `environment`
 
 Names dropped, names set, and nothing else: a full environment would copy whatever
-the reader's shell held.
+the reader's shell held. The thread-pool variables a measured child is given are
+named here too.
+
+Beneath those names, `resource_limits` states the enforcement a launch ran under,
+because a figure measured without a bound is not comparable with one measured
+under one:
+
+| Key | What it holds |
+|---|---|
+| `capability.available` | whether this host could enforce a cgroup bound at launch |
+| `capability.reason` | what was verified, or why enforcement was refused |
+| `bounds.memory_max_bytes` / `memory_max_mib` | the cgroup RSS-plus-page-cache cap, not `RLIMIT_AS` |
+| `bounds.memory_swap_max_bytes` | always `0`: the tree cannot swap |
+| `bounds.cpu_quota_percent` | total CPU the whole tree may use |
+| `bounds.tasks_max` | the most tasks/threads the tree may create |
+| `bounds.threads` | the default numerical thread cap given to the child |
+| `bounds.origin` | `derived` from this machine, or `environment` when overridden |
+| `lock_path` / `lock_timeout_seconds` | the cross-invocation heavy-work lock and its wait |
+
+A performance run's own record carries the same `resource_limits` object at its top
+level, taken once for the run rather than per probe.
 
 ## Reading an older record
 

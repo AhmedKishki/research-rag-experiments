@@ -21,7 +21,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .. import resource_limits
 from ..errors import ExperimentError
+from ..niceness import run_low_priority
 from .locate import ENGINE_HARNESS_ENV, EngineSource
 
 #: The module run inside the tree. Named here once so the parent and the child
@@ -114,7 +116,7 @@ def resolve_settings_for_tree(
     )
     environment = child_environment(engine)
     try:
-        completed = subprocess.run(
+        completed = run_low_priority(
             [sys.executable, "-m", RESOLVER_MODULE],
             input=request,
             capture_output=True,
@@ -182,6 +184,11 @@ def child_environment(
       absolute path it resolves to is pinned into the sandbox's settings.
     - `PYTHONDONTWRITEBYTECODE` is set, because the tree under test is frequently a
       developer's working checkout and an import must not write beside it.
+    - The default thread count of the common numerical libraries is capped, so a
+      library that honours `OMP_NUM_THREADS` and its peers does not use every core
+      for one measured child. A library that ignores them is still bounded by the
+      cgroup CPU quota the child tree runs under; the cap here is the cheap half.
+      A variable the reader already set is left alone.
     - Nothing else is touched, so a child inherits the machine's own paths and
       credentials for whatever the app legitimately needs.
     """
@@ -196,6 +203,8 @@ def child_environment(
         tree_source if not existing else f"{tree_source}{os.pathsep}{existing}"
     )
     environment[BYTECODE_ENV] = "1"
+    for name, value in resource_limits.thread_environment().items():
+        environment.setdefault(name, value)
     if config_home is not None:
         environment[CONFIG_HOME_ENV] = str(config_home)
     if extra:
@@ -222,12 +231,16 @@ def describe_child_environment(
         ENGINE_HARNESS_ENV: str(engine.source_relative),
         BYTECODE_ENV: "1",
     }
+    for name, value in resource_limits.thread_environment().items():
+        if os.environ.get(name) != value:
+            given[name] = value
     if config_home is not None:
         given[CONFIG_HOME_ENV] = str(config_home)
     return {
         "dropped_variables": dropped,
         "dropped_prefixes": list(SETTINGS_PREFIXES),
         "given": given,
+        "resource_limits": resource_limits.describe(),
         "note": (
             "Every other variable is inherited. The model cache is not relocated: "
             "its resolved path is pinned into the sandbox's settings file."

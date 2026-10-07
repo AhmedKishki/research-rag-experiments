@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from rag_experiments import resource_limits
 from rag_experiments.engine.harness import harness_contract
 from rag_experiments.engine.locate import ENGINE_HARNESS_ENV, locate_engine, tree_digest
 from rag_experiments.engine.resolve_settings import (
@@ -318,6 +319,8 @@ def test_the_record_states_what_a_child_environment_changes(
 ) -> None:
     monkeypatch.setenv("RESEARCH_RAG_RRF_K", "1")
     monkeypatch.setenv("RESEARCH_ULTRARAG_DENSE_BACKEND", "exact")
+    for name in resource_limits.THREAD_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
     described = describe_child_environment(
         locate_engine(app_source), config_home=tmp_path
     )
@@ -327,13 +330,15 @@ def test_the_record_states_what_a_child_environment_changes(
     ]
     assert described["given"][BYTECODE_ENV] == "1"
     assert described["given"][CONFIG_HOME_ENV] == str(tmp_path)
-    # Only names dropped and values this module sets are reported: a whole
-    # environment would carry whatever the reader's shell held.
+    # The numerical thread pools are capped by default, and those names are
+    # reported as set; a reader's own value for one of them is left alone.
     assert set(described["given"]) == {
         ENGINE_HARNESS_ENV,
         BYTECODE_ENV,
         CONFIG_HOME_ENV,
+        *resource_limits.THREAD_ENV_VARS,
     }
+    assert described["resource_limits"]["capability"]["available"] is True
 
 
 def test_a_tree_precedes_the_interpreters_own_path(app_source: Path) -> None:

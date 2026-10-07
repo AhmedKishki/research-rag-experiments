@@ -2167,7 +2167,7 @@ wheels = [
 
 [[package]]
 name = "research-rag"
-version = "1.0.0"
+version = "1.2.0"
 source = { editable = "../ultra-rag-mcp-servers/research-rag" }
 dependencies = [
     { name = "beautifulsoup4" },
@@ -2177,6 +2177,7 @@ dependencies = [
     { name = "fastmcp" },
     { name = "filelock" },
     { name = "httpx" },
+    { name = "huggingface-hub" },
     { name = "numba" },
     { name = "numpy" },
     { name = "platformdirs" },
@@ -2199,18 +2200,21 @@ requires-dist = [
     { name = "fastmcp", specifier = "==3.4.0" },
     { name = "filelock", specifier = ">=3.16,<5" },
     { name = "httpx", specifier = ">=0.28" },
+    { name = "huggingface-hub", specifier = ">=0.20,<2" },
     { name = "numba", specifier = "==0.65.0" },
     { name = "numpy", specifier = ">=1.26,<3" },
     { name = "platformdirs", specifier = ">=4.3,<5" },
     { name = "pydantic", specifier = ">=2.12,<3" },
     { name = "pymupdf", specifier = ">=1.26,<2" },
     { name = "qdrant-client", specifier = "==1.19.1" },
+    { name = "rapidocr-onnxruntime", marker = "extra == 'ocr'", specifier = ">=1.4,<2" },
     { name = "starlette", specifier = ">=1.6,<2" },
     { name = "tokenizers", specifier = ">=0.20,<1" },
     { name = "tokie", specifier = ">=0.1,<1" },
     { name = "ultrarag", url = "https://github.com/OpenBMB/UltraRAG/archive/3a709a2aea3fbe46acca59c422621c94b6e86857.tar.gz" },
     { name = "uvicorn", specifier = ">=0.53,<1" },
 ]
+provides-extras = ["ocr"]
 
 [package.metadata.requires-dev]
 dev = [

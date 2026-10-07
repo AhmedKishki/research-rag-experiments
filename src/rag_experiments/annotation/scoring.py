@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 from ..errors import ExperimentError
+from ..niceness import run_low_priority
 from ..sandbox.layout import refuse_nested
 from .build import _private_output
 from .export import HANDOFF_PROTOCOL
@@ -60,7 +61,7 @@ def score_handoff(
     if baseline is not None:
         command.extend(["--baseline", baseline])
     try:
-        completed = subprocess.run(
+        completed = run_low_priority(
             command, capture_output=True, text=True, timeout=300, check=False
         )
     except (OSError, subprocess.TimeoutExpired) as exc:

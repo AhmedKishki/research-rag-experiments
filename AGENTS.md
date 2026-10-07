@@ -11,6 +11,23 @@ description: State the experiment toolkit's safety, measurement, and engineering
 - Keep this developer tool independent of the collection's server release history.
 - Do not change retrieval defaults, activate a live generation, or invent human judgments as part of a harness repair.
 
+## Resource priority and sequencing
+
+- Every subprocess this toolkit launches on a measured, scored, benchmarked, or preparation path is both low priority and resource-bounded.
+  - Enforcement lives in one place: `niceness.run_low_priority` sets priority before `exec` and delegates the launch to `resource_limits.launch`.
+  - `resource_limits.launch` starts the whole child tree in a cgroup v2 transient scope with enforced `MemoryMax`, `MemorySwapMax=0`, `CPUQuota`, and `TasksMax`, so descendants a measured program spawns share one bound.
+  - Niceness alone is insufficient: it decides who wins the CPU, not how much memory a tree may hold, so a run under `nice` can still drive the host into swap.
+  - `MemoryMax` is a cgroup RSS-plus-page-cache limit; it is never `RLIMIT_AS`, which would refuse a child that has reserved addresses it does not use.
+  - Do not add a raw `subprocess.run`/`Popen` on any such path.
+- The rule is fail-closed at both layers: a host or child that cannot establish niceness 19, or a host that cannot enforce a cgroup bound, refuses the launch instead of running at normal or unbounded priority.
+  - Capability is verified by creating a memory-limited scope and reading `memory.max` back, not by trusting the request.
+- Heavy work is serialized across separate invocations by a cross-process file lock; a second run waits a bounded time and then refuses rather than overlapping.
+  - A timeout or an interrupt stops the scope, which ends every descendant, and cannot leave the tree running.
+- The numerical thread pools of a measured child are capped by default; a reader's own value for one is left alone.
+- Run evaluations, benchmarks, preparation, and test suites sequentially, one at a time; never start a second while one is running.
+- Issue validation commands through `nice -n 19`; `README.md` holds the commands and the override names.
+- `STORAGE.md` owns the record schema for the applied limits.
+
 ## Source protection
 
 - Source projects are read-only inputs.

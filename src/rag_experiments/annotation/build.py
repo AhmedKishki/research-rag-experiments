@@ -11,13 +11,13 @@ import os
 import random
 import secrets
 import shutil
-import subprocess
 import tempfile
 import uuid
 from pathlib import Path
 from typing import Any
 
 from ..errors import ExperimentError
+from ..niceness import run_low_priority
 from ..sandbox.layout import refuse_nested
 from .inputs import (
     SEGMENT,
@@ -140,7 +140,7 @@ def _private_output(output: Path) -> None:
     while not parent.exists():
         parent = parent.parent
     try:
-        repo = subprocess.run(
+        repo = run_low_priority(
             ["git", "-C", str(parent), "rev-parse", "--show-toplevel"],
             capture_output=True,
             text=True,
@@ -155,7 +155,7 @@ def _private_output(output: Path) -> None:
             "private/key.json",
             "private/manifest.json",
         ):
-            ignored = subprocess.run(
+            ignored = run_low_priority(
                 [
                     "git",
                     "-C",

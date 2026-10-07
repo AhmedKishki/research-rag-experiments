@@ -198,13 +198,21 @@ uv run rag-experiments annotation score --input annotations/results/handoff.json
 ## Validation
 
 ```bash
-uv lock --check
-uv run ruff format --check .
-uv run ruff check .
-uv run pytest -q
-uv run python -m compileall -q src tests
+nice -n 19 uv lock --check
+nice -n 19 uv run ruff format --check .
+nice -n 19 uv run ruff check .
+nice -n 19 uv run pytest -q
+nice -n 19 uv run python -m compileall -q src tests
 ```
 
+- Every validation command runs at `nice -n 19`, and they run sequentially, one at a time.
+- Every subprocess the toolkit itself launches is both lowered to `19` before it starts and resource-bounded, and a host that cannot do either fails the launch instead of running at normal or unbounded priority.
+- The bound is a cgroup v2 transient scope created through the reader's own `systemd --user` manager: `MemoryMax` (RSS plus page cache, derived from available RAM minus a reserve and capped), `MemorySwapMax=0` (no swapping, so a heavy run cannot fill swap and stall the host), a conservative `CPUQuota`, and `TasksMax` across the whole descendant tree.
+- Enforcement is verified at launch by creating a memory-limited scope and reading `memory.max` back; a host without cgroup v2, `systemd-run`, or a user manager refuses to run a bounded path. `rag-experiments` never uses `RLIMIT_AS` as a memory cap.
+- The numerical thread pools of a measured child are capped by default (`OMP_NUM_THREADS` and peers); the cgroup quota is the backstop when a library ignores them.
+- Heavy work is serialized across separate invocations by a lock under `$XDG_STATE_HOME/rag-experiments/heavy.lock`, so two shells cannot start overlapping workloads.
+- A reader who needs a different bound may set `RAG_EXPERIMENTS_MEMORY_MAX_MIB`, `RAG_EXPERIMENTS_CPU_QUOTA_PERCENT`, `RAG_EXPERIMENTS_THREADS`, `RAG_EXPERIMENTS_TASKS_MAX`, or `RAG_EXPERIMENTS_LOCK_TIMEOUT_SECONDS`; the memory override is clamped below half of physical RAM.
+- The applied limits, the capability result, and the lock path are recorded in each run's provenance (`STORAGE.md`).
 - Integration tests exercise the run orchestrator, failure finalization, repeated runs, evidence retention, and source guards.
 - Synthetic contract tests do not establish retrieval quality on a real corpus.
 - An algorithm decision needs author-judged evidence, paired target-family uncertainty, and an untouched confirmation set.

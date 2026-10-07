@@ -38,6 +38,7 @@ from ..engine.locate import (
     locate_engine,
 )
 from ..errors import ExperimentError
+from ..niceness import run_low_priority
 
 #: What is never copied into a code arm's tree: a virtual environment would be a
 #: second install of the same tree, and the caches are build products of it. The
@@ -280,7 +281,7 @@ def _restore_untracked(source: Path, destination: Path, names: list[str]) -> Non
 
 def _git(root: Path, arguments: list[str], *, cwd: Path | None = None) -> str:
     try:
-        completed = subprocess.run(
+        completed = run_low_priority(
             ["git", "-C", str(root), *arguments],
             capture_output=True,
             text=True,
